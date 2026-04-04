@@ -79,6 +79,11 @@ contract MyShopItems {
         bool soulbound;
         string tokenURI;
         bool requiresSerial;
+        // C1/C2 fields (0 = unchanged / no restriction)
+        uint256 maxSupply;
+        uint32 perWallet;
+        uint64 startTime;
+        uint64 endTime;
     }
 
     struct PurchaseContext {
@@ -322,6 +327,7 @@ contract MyShopItems {
         if (!item.active && item.shopId == 0) revert ItemNotFound();
         if (!shops.hasShopRole(item.shopId, msg.sender, ROLE_ITEM_EDITOR)) revert NotShopOwner();
         if (p.nftContract == address(0) || p.unitPrice == 0) revert InvalidAddress();
+        if (p.endTime > 0 && p.startTime > 0 && p.endTime <= p.startTime) revert SaleEnded();
 
         item.payToken = p.payToken;
         item.unitPrice = p.unitPrice;
@@ -329,6 +335,10 @@ contract MyShopItems {
         item.soulbound = p.soulbound;
         item.tokenURI = p.tokenURI;
         item.requiresSerial = p.requiresSerial;
+        item.maxSupply = p.maxSupply;
+        item.perWallet = p.perWallet;
+        item.startTime = p.startTime;
+        item.endTime = p.endTime;
 
         emit ItemUpdated(itemId);
     }

@@ -10,6 +10,35 @@ import {
   myShopsAbi
 } from "./contracts.js";
 
+// F7: mobile-responsive base styles
+(function injectMobileStyles() {
+  const style = document.createElement("style");
+  style.textContent = `
+    /* F7: responsive layout */
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; padding: 8px; font-family: system-ui, sans-serif; font-size: 15px; }
+    #app { max-width: 960px; margin: 0 auto; }
+    h1 { font-size: 1.3em; margin: 4px 0; }
+    h2 { font-size: 1.1em; margin: 8px 0; }
+    h3 { font-size: 1em; margin: 6px 0; }
+    /* nav wraps on small screens */
+    #app > div:first-child > div:last-child { display: flex; flex-wrap: wrap; gap: 4px; }
+    a { color: #0070f3; }
+    button { touch-action: manipulation; min-height: 36px; padding: 0 12px; cursor: pointer; }
+    input, select, textarea { width: 100%; max-width: 480px; min-height: 36px; padding: 4px 8px; }
+    .card { border: 1px solid #ddd; border-radius: 6px; padding: 12px; background: #fff; }
+    .section-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    pre#txOut { white-space: pre-wrap; word-break: break-all; font-size: 0.8em; }
+    /* grids auto-collapse on mobile */
+    @media (max-width: 600px) {
+      body { padding: 4px; font-size: 14px; }
+      button { width: 100%; margin-bottom: 4px; }
+      input, select { max-width: 100%; }
+    }
+  `;
+  document.head.appendChild(style);
+})();
+
 const envCfg = loadConfig();
 const storageKey = "myshop_frontend_config_v1";
 

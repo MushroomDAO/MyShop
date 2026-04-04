@@ -2,6 +2,7 @@ import { getAddress } from "viem";
 import fs from "node:fs";
 
 import { optionalEnv, requireEnv } from "./env.js";
+import { log } from "./logger.js";
 import { getDeploymentDefaults } from "../../frontend/src/deployments.js";
 import { startApiServer } from "./apiServer.js";
 import { startPermitServer } from "./permitServer.js";
@@ -65,7 +66,7 @@ if (mode === "watch" || mode === "both") {
           }
         : null
   }).catch((e) => {
-    process.stderr.write(String(e) + "\n");
+    log.error("watchPurchased fatal", { error: String(e) });
     process.exit(1);
   });
 }
@@ -81,10 +82,10 @@ if (mode === "permit" || mode === "both") {
     port
   })
     .then(({ port: actualPort }) => {
-      process.stdout.write(`permit server listening on ${actualPort}\n`);
+      log.info("permit server started", { port: actualPort });
     })
     .catch((e) => {
-      process.stderr.write(String(e) + "\n");
+      log.error("permit server fatal", { error: String(e) });
       process.exit(1);
     });
 }
@@ -97,10 +98,10 @@ if (enableApi) {
     port: apiPort
   })
     .then(({ port: actualPort }) => {
-      process.stdout.write(`api server listening on ${actualPort}\n`);
+      log.info("api server started", { port: actualPort });
     })
     .catch((e) => {
-      process.stderr.write(String(e) + "\n");
+      log.error("api server fatal", { error: String(e) });
       process.exit(1);
     });
 }
