@@ -64,7 +64,9 @@ contract DemoShopFlow is Script {
             maxSupply: 0,
             perWallet: 0,
             startTime: 0,
-            endTime: 0
+            endTime: 0,
+            eligibilityValidator: address(0),
+            eligibilityValidatorData: ""
         });
 
         uint256 itemId = items.addItem(p);

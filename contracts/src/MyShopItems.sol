@@ -1,4 +1,5 @@
-pragma solidity ^0.8.20;
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity 0.8.33;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
@@ -22,7 +23,7 @@ interface IMyShopItemAction {
 }
 
 contract MyShopItems {
-    MyShops public shops;
+    MyShops public immutable shops;
     address public owner;
 
     address public riskSigner;
@@ -156,6 +157,7 @@ contract MyShopItems {
     event SerialSignerUpdated(address indexed signer);
     event ActionAllowed(address indexed action, bool allowed);
     event ValidatorAllowed(address indexed validator, bool allowed);
+    event DisputeWindowUpdated(uint256 oldSeconds, uint256 newSeconds);
     event ItemAdded(uint256 indexed itemId, uint256 indexed shopId, address indexed shopOwner);
     event ItemStatusChanged(uint256 indexed itemId, bool active);
     event ItemUpdated(uint256 indexed itemId);
@@ -209,6 +211,8 @@ contract MyShopItems {
 
     constructor(address shops_, address riskSigner_, address serialSigner_) {
         if (shops_ == address(0)) revert InvalidAddress();
+        if (riskSigner_ == address(0)) revert InvalidAddress();
+        if (serialSigner_ == address(0)) revert InvalidAddress();
         shops = MyShops(shops_);
         owner = msg.sender;
         riskSigner = riskSigner_;
@@ -230,11 +234,13 @@ contract MyShopItems {
     }
 
     function setRiskSigner(address signer) external onlyOwner {
+        if (signer == address(0)) revert InvalidAddress();
         riskSigner = signer;
         emit RiskSignerUpdated(signer);
     }
 
     function setSerialSigner(address signer) external onlyOwner {
+        if (signer == address(0)) revert InvalidAddress();
         serialSigner = signer;
         emit SerialSignerUpdated(signer);
     }
@@ -315,14 +321,10 @@ contract MyShopItems {
 
         _enforceItemLimit(shopOwner, p.shopId, p.maxItems, p.deadline, p.nonce, p.signature);
 
-        address feeToken = shops.listingFeeToken();
-        uint256 feeAmount = shops.listingFeeAmount();
-        if (feeAmount > 0) {
-            bool ok = IERC20(feeToken).transferFrom(msg.sender, shops.platformTreasury(), feeAmount);
-            if (!ok) revert TransferFailed();
-        }
-
+        // CEI: write all state before external fee transfer to prevent reentrancy via fee token
         itemId = ++itemCount;
+        shopItemCount[p.shopId] += 1;
+
         // Assign fields individually to avoid stack-too-deep with large struct
         Item storage newItem = _items[itemId];
         newItem.shopId = p.shopId;
@@ -344,7 +346,14 @@ contract MyShopItems {
         if (p.eligibilityValidatorData.length > 0) {
             itemEligibilityData[itemId] = p.eligibilityValidatorData;
         }
-        shopItemCount[p.shopId] += 1;
+
+        // INTERACTION: listing fee transfer (after state is written)
+        address feeToken = shops.listingFeeToken();
+        uint256 feeAmount = shops.listingFeeAmount();
+        if (feeAmount > 0) {
+            bool ok = IERC20(feeToken).transferFrom(msg.sender, shops.platformTreasury(), feeAmount);
+            if (!ok) revert TransferFailed();
+        }
 
         emit ItemAdded(itemId, p.shopId, msg.sender);
     }
@@ -420,7 +429,8 @@ contract MyShopItems {
     // C11: dispute window config (owner can adjust; per-shop override comes in M4 DisputeModule)
     uint256 public constant MAX_DISPUTE_WINDOW = 90 days;
     function setDisputeWindowSeconds(uint256 seconds_) external onlyOwner {
-        if (seconds_ > MAX_DISPUTE_WINDOW) revert InvalidPayment(); // reuse error; window > 90 days not allowed
+        if (seconds_ > MAX_DISPUTE_WINDOW) revert InvalidPayment(); // window > 90 days not allowed
+        emit DisputeWindowUpdated(disputeWindowSeconds, seconds_);
         disputeWindowSeconds = seconds_;
     }
 
