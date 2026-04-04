@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {MyShops} from "./MyShops.sol";
+import {IEligibilityValidator} from "./interfaces/IEligibilityValidator.sol";
 
 interface ICommunityNFTMint {
     function mint(address to, string calldata uri, bool soulbound) external returns (uint256);
@@ -34,6 +35,10 @@ contract MyShopItems {
 
     mapping(address => mapping(uint256 => bool)) public usedNonces;
     mapping(address => bool) public allowedActions;
+    // C10: protocol-level whitelist of approved eligibility validator contracts
+    mapping(address => bool) public allowedValidators;
+    // C10: per-item eligibility validator config data (separate mapping to avoid stack-too-deep)
+    mapping(uint256 => bytes) public itemEligibilityData;
 
     uint256 public itemCount;
 
@@ -65,6 +70,8 @@ contract MyShopItems {
         uint64 endTime;
         // C3: item-level pause
         bool paused;
+        // C10: eligibility validator (0 = no restriction, anyone can buy)
+        address eligibilityValidator;
     }
 
     struct ItemPage {
@@ -84,6 +91,9 @@ contract MyShopItems {
         uint32 perWallet;
         uint64 startTime;
         uint64 endTime;
+        // C10: eligibility validator (address(0) = no restriction)
+        address eligibilityValidator;
+        bytes eligibilityValidatorData; // stored in itemEligibilityData[itemId]
     }
 
     struct PurchaseContext {
@@ -127,6 +137,9 @@ contract MyShopItems {
         // C2: time window
         uint64 startTime;
         uint64 endTime;
+        // C10: eligibility validator (address(0) = no restriction)
+        address eligibilityValidator;
+        bytes eligibilityValidatorData; // stored in itemEligibilityData[itemId]
     }
 
     mapping(uint256 => Item) internal _items;
@@ -139,6 +152,7 @@ contract MyShopItems {
     event RiskSignerUpdated(address indexed signer);
     event SerialSignerUpdated(address indexed signer);
     event ActionAllowed(address indexed action, bool allowed);
+    event ValidatorAllowed(address indexed validator, bool allowed);
     event ItemAdded(uint256 indexed itemId, uint256 indexed shopId, address indexed shopOwner);
     event ItemStatusChanged(uint256 indexed itemId, bool active);
     event ItemUpdated(uint256 indexed itemId);
@@ -177,6 +191,8 @@ contract MyShopItems {
     error NonceUsed();
     error SerialRequired();
     error ActionNotAllowed();
+    error ValidatorNotAllowed();
+    error NotEligible();
     error InvalidVersion();
     error InvalidURI();
     // C1
@@ -223,6 +239,12 @@ contract MyShopItems {
     function setActionAllowed(address action, bool allowed) external onlyOwner {
         allowedActions[action] = allowed;
         emit ActionAllowed(action, allowed);
+    }
+
+    // C10: protocol owner manages the eligibility validator whitelist
+    function setValidatorAllowed(address validator, bool allowed) external onlyOwner {
+        allowedValidators[validator] = allowed;
+        emit ValidatorAllowed(validator, allowed);
     }
 
     function setItemActive(uint256 itemId, bool active) external {
@@ -288,6 +310,7 @@ contract MyShopItems {
         if (!shops.hasShopRole(p.shopId, msg.sender, ROLE_ITEM_EDITOR)) revert NotShopOwner();
         if (p.nftContract == address(0) || p.unitPrice == 0) revert InvalidAddress();
         if (p.action != address(0) && !allowedActions[p.action]) revert ActionNotAllowed();
+        if (p.eligibilityValidator != address(0) && !allowedValidators[p.eligibilityValidator]) revert ValidatorNotAllowed();
         if (p.endTime > 0 && p.startTime > 0 && p.endTime <= p.startTime) revert SaleEnded();
 
         _enforceItemLimit(shopOwner, p.shopId, p.maxItems, p.deadline, p.nonce, p.signature);
@@ -300,23 +323,27 @@ contract MyShopItems {
         }
 
         itemId = ++itemCount;
-        _items[itemId] = Item({
-            shopId: p.shopId,
-            payToken: p.payToken,
-            unitPrice: p.unitPrice,
-            nftContract: p.nftContract,
-            soulbound: p.soulbound,
-            tokenURI: p.tokenURI,
-            action: p.action,
-            actionData: p.actionData,
-            requiresSerial: p.requiresSerial,
-            active: true,
-            maxSupply: p.maxSupply,
-            perWallet: p.perWallet,
-            startTime: p.startTime,
-            endTime: p.endTime,
-            paused: false
-        });
+        // Assign fields individually to avoid stack-too-deep with large struct
+        Item storage newItem = _items[itemId];
+        newItem.shopId = p.shopId;
+        newItem.payToken = p.payToken;
+        newItem.unitPrice = p.unitPrice;
+        newItem.nftContract = p.nftContract;
+        newItem.soulbound = p.soulbound;
+        newItem.tokenURI = p.tokenURI;
+        newItem.action = p.action;
+        newItem.actionData = p.actionData;
+        newItem.requiresSerial = p.requiresSerial;
+        newItem.active = true;
+        newItem.maxSupply = p.maxSupply;
+        newItem.perWallet = p.perWallet;
+        newItem.startTime = p.startTime;
+        newItem.endTime = p.endTime;
+        newItem.paused = false;
+        newItem.eligibilityValidator = p.eligibilityValidator;
+        if (p.eligibilityValidatorData.length > 0) {
+            itemEligibilityData[itemId] = p.eligibilityValidatorData;
+        }
         shopItemCount[p.shopId] += 1;
 
         emit ItemAdded(itemId, p.shopId, msg.sender);
@@ -330,6 +357,8 @@ contract MyShopItems {
         if (p.endTime > 0 && p.startTime > 0 && p.endTime <= p.startTime) revert SaleEnded();
         // C9: cannot lower maxSupply below already-sold count
         if (p.maxSupply > 0 && p.maxSupply < itemSoldCount[itemId]) revert ExceedsMaxSupply();
+        // C10: validator must be whitelisted
+        if (p.eligibilityValidator != address(0) && !allowedValidators[p.eligibilityValidator]) revert ValidatorNotAllowed();
 
         item.payToken = p.payToken;
         item.unitPrice = p.unitPrice;
@@ -341,6 +370,8 @@ contract MyShopItems {
         item.perWallet = p.perWallet;
         item.startTime = p.startTime;
         item.endTime = p.endTime;
+        item.eligibilityValidator = p.eligibilityValidator;
+        itemEligibilityData[itemId] = p.eligibilityValidatorData;
 
         emit ItemUpdated(itemId);
     }
@@ -435,6 +466,15 @@ contract MyShopItems {
         }
         if (item.perWallet > 0) {
             if (walletPurchaseCount[itemId][recipient] + quantity > item.perWallet) revert ExceedsPerWallet();
+        }
+
+        // C10: eligibility validator check (0 = anyone can buy)
+        if (item.eligibilityValidator != address(0)) {
+            bool eligible = IEligibilityValidator(item.eligibilityValidator).checkEligibility(
+                msg.sender, recipient, itemId, item.shopId, quantity,
+                itemEligibilityData[itemId], extraData
+            );
+            if (!eligible) revert NotEligible();
         }
 
         bytes32 serialHash = bytes32(0);

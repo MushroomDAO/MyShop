@@ -82,7 +82,9 @@ contract ItemConstraintsTest is Test {
             maxSupply: maxSupply,
             perWallet: perWallet,
             startTime: startTime,
-            endTime: endTime
+            endTime: endTime,
+            eligibilityValidator: address(0),
+            eligibilityValidatorData: ""
         });
         vm.prank(community);
         itemId = items.addItem(p);
@@ -366,7 +368,9 @@ contract ItemConstraintsTest is Test {
             maxSupply: 0,
             perWallet: 0,
             startTime: 0,
-            endTime: 0
+            endTime: 0,
+            eligibilityValidator: address(0),
+            eligibilityValidatorData: ""
         });
 
         vm.prank(community);

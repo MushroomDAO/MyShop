@@ -90,7 +90,9 @@ contract MyShopFlowTest is Test {
             maxSupply: 0,
             perWallet: 0,
             startTime: 0,
-            endTime: 0
+            endTime: 0,
+            eligibilityValidator: address(0),
+            eligibilityValidatorData: ""
         });
         itemId = items.addItem(p);
     }
@@ -147,7 +149,9 @@ contract MyShopFlowTest is Test {
             maxSupply: 0,
             perWallet: 0,
             startTime: 0,
-            endTime: 0
+            endTime: 0,
+            eligibilityValidator: address(0),
+            eligibilityValidatorData: ""
         });
 
         vm.prank(community);
