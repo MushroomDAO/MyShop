@@ -176,3 +176,309 @@
   - 检查：resolver 与 `contenthash` 是否设置；发布页面后是否更新到最新 CID；等待解析生效
   - 回退策略：未配置 ENS 时使用常规域名与路径
   - 参考：ENS 独立文档 [ens.md](file:///Users/jason/Dev/crypto-projects/MyShop/docs/ens.md)
+
+---
+
+# M1 里程碑验收用例（v0.2.0-M1，按角色）
+
+> 本节为 M1（C1–C11 / W1–W7 / F1–F8）的完整角色化验收指导。  
+> 每个角色提供：前置条件、验收步骤、预期结果。  
+> 基础环境已在"前置条件"一节说明（Anvil 本地 + 已部署合约 + Worker 运行）。
+
+---
+
+## 角色一：协议管理员（Protocol Admin / Protocol Owner）
+
+**身份**：`MyShopItems.owner` 与 `MyShops.owner`，合约部署者。  
+**入口页面**：`#/protocol-console`
+
+### P-01 — 查看协议配置
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 打开 `#/protocol-console`，点击"Read Protocol Config" | 显示 platformTreasury、platformFeeBps（默认 300）、listingFee（0 或已设值）、riskSigner、serialSigner |
+
+### P-02 — 修改平台费率
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 在"Set Protocol Fee"填入 `200`（即 2%），点击 Set | 交易成功，再次 Read Config 显示 200 |
+| 2 | 重新购买一次商品 | 手续费按 2% 计算，shopTreasury 收到 98%，platformTreasury 收到 2% |
+
+### P-03 — 动作白名单管理（setActionAllowed）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 将某 action 地址设置为 `allowed=false` | 对该 action 上架新 item 时报 `ActionNotAllowed` |
+| 2 | 重新设置为 `allowed=true` | 可正常上架 |
+
+### P-04 — 资质验证器白名单（setValidatorAllowed，C10）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 部署一个实现 `IEligibilityValidator` 接口的合约 | 合约部署成功 |
+| 2 | 调用 `setValidatorAllowed(addr, true)` | 交易成功 |
+| 3 | 创建一个 eligibilityValidator=addr 的 item | 成功 |
+| 4 | 创建 eligibilityValidator=未白名单addr 的 item | 报 `ValidatorNotAllowed` |
+
+### P-05 — 协议资金救援（rescueETH / rescueERC20，C8）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 向合约发送少量 ETH（测试用） | 合约余额增加 |
+| 2 | 调用 `rescueETH(to=owner)` | ETH 转出，合约余额归零 |
+| 3 | 向合约发送 ERC20（测试 token） | 合约 token 余额增加 |
+| 4 | 调用 `rescueERC20(token, to=owner)` | ERC20 转出 |
+
+### P-06 — 提取 Shop 余额（withdrawShopBalance，C7）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 用协议管理员钱包调用 `withdrawShopBalance(shopId=1, token=USDC)` | 合约中该 token 全额转入 shopTreasury，emit ShopBalanceWithdrawn |
+| 2 | 用非 owner 地址调用同函数 | 报 `NotShopOwner`（owner-only） |
+
+### P-07 — 兑换冷静期配置（setDisputeWindowSeconds，C11）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 调用 `setDisputeWindowSeconds(3 days)` | 成功 |
+| 2 | 调用 `setDisputeWindowSeconds(91 days)` | 报错（超过 MAX_DISPUTE_WINDOW=90 days） |
+| 3 | 购买一个 item，查询 `isInDisputeWindow(purchaseId)` | 在 3 天内返回 true；warp 3 天后返回 false |
+
+---
+
+## 角色二：社区 Admin（Community Admin）
+
+**身份**：在 AAStar Registry 持有 `ROLE_COMMUNITY` 角色，可注册 Shop。  
+**入口页面**：`#/shop-console`（注册后）
+
+### C-01 — 注册 Shop
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 打开 `#/shop-console`，填入 treasury 地址与 metadataHash，点击 Register | 交易成功，shopCount 加 1 |
+| 2 | 用非 ROLE_COMMUNITY 地址注册 | 报 `NotCommunity` |
+
+### C-02 — 设置 Shop Roles（授权 operator）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 填入 operator 地址，勾选 itemEditor + itemMaintainer + itemActionEditor，点击 Set Roles | 成功 |
+| 2 | 切换到 operator 钱包，进入 `#/shop-console`，点击 Check Access | 显示 rolesMask 非零，有对应角色位 |
+
+### C-03 — 暂停/恢复 Shop（C4）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 调用 `setShopPaused(shopId, true)` | Shop 暂停 |
+| 2 | 买家尝试购买该 Shop 的 item | 报 `ShopPaused` |
+| 3 | 调用 `setShopPaused(shopId, false)` | 购买恢复正常 |
+| 4 | 暂停后尝试 addItem | 报 `ShopPaused` |
+
+---
+
+## 角色三：Shop 店主（Shop Owner / Operator）
+
+**身份**：已注册 Shop 的 community 地址，或被授权 ROLE_ITEM_EDITOR 的 operator。  
+**入口页面**：`#/shop-console`
+
+### S-01 — 上架普通 Item（无约束）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 填写 payToken=USDC、unitPrice=1000、nftContract、tokenURI、maxSupply=0、perWallet=0 | 成功，itemCount 加 1 |
+| 2 | 买家购买 3 次 | 均成功（无限量） |
+
+### S-02 — 上架限量 Item（C1 maxSupply）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 上架 maxSupply=3 的 item | 成功 |
+| 2 | 买家购买 3 次 | 成功，soldCount=3 |
+| 3 | 买家再购买 1 次 | 报 `ExceedsMaxSupply` |
+
+### S-03 — 上架限钱包 Item（C1 perWallet）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 上架 perWallet=2 的 item | 成功 |
+| 2 | buyer 购买 recipient=A 2次 | 成功，walletPurchaseCount[A]=2 |
+| 3 | buyer 再购买 recipient=A 1次 | 报 `ExceedsPerWallet` |
+| 4 | buyer 购买 recipient=B 2次 | 成功（B 独立计数） |
+
+### S-04 — 上架时间窗口 Item（C2）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 上架 startTime=now+1h，endTime=now+2d | 成功 |
+| 2 | 立即购买 | 报 `NotYetAvailable` |
+| 3 | warp 1h 后购买 | 成功 |
+| 4 | warp 2d 后购买 | 报 `SaleEnded` |
+
+### S-05 — Item 级暂停（C3）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 调用 `pauseItem(itemId, true)` | Item paused=true，emit ItemPaused |
+| 2 | 买家购买 | 报 `ItemPausedError` |
+| 3 | 调用 `pauseItem(itemId, false)` | 购买恢复 |
+| 4 | 非 shopOwner 调用 pauseItem | 报 `NotShopOwner` |
+
+### S-06 — 更新 Item（C9）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 修改 unitPrice、tokenURI、maxSupply（不低于已售量） | 成功，getItem 读出新值 |
+| 2 | 设置 maxSupply 低于 soldCount | 报 `ExceedsMaxSupply` |
+
+### S-07 — 版本化 ItemPage
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | addItemPageVersion(itemId, uri_v1, hash_v1) | version=1，defaultPageVersion=1 |
+| 2 | addItemPageVersion(itemId, uri_v2, hash_v2) | version=2，defaultPageVersion=2 |
+| 3 | setItemDefaultPageVersion(itemId, 1) | defaultPageVersion=1 |
+| 4 | getItemPage(itemId, 1) | 返回 (hash_v1, uri_v1) |
+
+### S-08 — 提取 Shop 余额（F6 UI）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 打开 `#/shop-console`，找到"Withdraw Shop Balance"区域 | 显示 shopId、token 输入框 |
+| 2 | 填入 shopId 与 token 地址，点击"Withdraw to Treasury" | 协议管理员（owner）操作成功，余额转入 shopTreasury |
+| 3 | 非 owner 点击"Withdraw to Treasury" | 报 `NotShopOwner`（合约 owner-only） |
+
+### S-09 — Shop 统计（W5 + F5）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 打开 `#/shop/:id`，页面展示 Shop 信息与统计 | 显示 totalPurchases、totalRevenue、uniqueBuyers、itemCount |
+| 2 | 调用 Worker `/shop-stats?shopId=1` | 返回 source=db 或 source=index 的统计数据，金额无精度丢失 |
+
+---
+
+## 角色四：买家（Buyer）
+
+**身份**：任意持有 payToken 的地址。  
+**入口页面**：`#/buyer`、`#/plaza`、`#/item/:id`
+
+### B-01 — 标准购买（ERC20）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | approve USDC 给 itemsContract | 成功 |
+| 2 | 购买 1 个 item（quantity=1，recipient=self） | NFT 铸造成功，USDC 分配：platformTreasury 3%，shopTreasury 97% |
+| 3 | 在 `#/my` 查看购买记录 | 显示该笔购买的 itemId、tokenId、时间 |
+
+### B-02 — 批量购买（C6 batch）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 购买 quantity=3 的 item（action=MintERC20） | 3 个 NFT 铸造，action 执行 3 次，totalCost=unitPrice×3 |
+| 2 | 查看 soldCount 与 walletPurchaseCount | 均加 3 |
+
+### B-03 — 串号购买（SerialPermit，B-04 重放保护）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 从 Worker `/serial-permit` 请求一个 permit | 返回 serialHash + EIP-712 签名 |
+| 2 | 用 extraData 包含该 permit 调用 buy() | 成功，NFT 铸造 |
+| 3 | 重放同一 permit 再次购买 | 报 `NonceUsed` |
+| 4 | 不带 permit 购买 requiresSerial=true 的 item | 报 `SerialRequired` |
+
+### B-04 — 资质验证（C10 eligibilityValidator）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 购买有 eligibilityValidator 的 item，买家满足条件 | 成功 |
+| 2 | 买家不满足条件（validator 返回 false） | 报 `NotEligible` |
+
+### B-05 — 查看 Item 详情（F1 + IPFS）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 打开 `#/item/1` | 显示 shopId、payToken、unitPrice、action、paused、maxSupply、soldCount、perWallet |
+| 2 | tokenURI=ipfs://... 时，图片/媒体通过多网关 fallback 加载（F8） | 主网关超时后自动切换备用网关，最终显示成功 |
+
+### B-06 — 购买状态机（F3 + F4 错误翻译）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 购买 Shop 已暂停的 item | `buyFlowOut` 显示"ShopPaused"并有中文/英文解释 |
+| 2 | 购买已超卖的 item | 显示"ExceedsMaxSupply"并有提示 |
+| 3 | 购买时间窗口外的 item | 显示"NotYetAvailable"或"SaleEnded" |
+
+### B-07 — 历史记录查询（F2 + W4）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 打开 `#/my`，连接钱包 | 显示该钱包的历史购买，包含 item/shop enrich |
+| 2 | 调用 Worker `/purchases?buyer=0x...` | 返回该买家的购买列表，包含 item 名称、shopId、金额 |
+| 3 | 调用 `/purchases?source=db&buyer=0x...` | 从 SQLite 返回完整历史（不限 in-memory 窗口） |
+
+---
+
+## 角色五：陪审团 / 仲裁员（Jury / Arbitrator）
+
+**身份**：M4 DisputeModule 尚未部署；M1 阶段仅验证冷静期数据记录正确性。  
+**入口**：链上只读调用（cast call 或 ethers.js）
+
+### J-01 — 购买时间戳记录（C11）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 购买 1 个 item，取得 tx receipt 中的 firstTokenId | 例如 firstTokenId=1 |
+| 2 | 计算 purchaseId = keccak256(abi.encode(itemId, firstTokenId, buyer, block.timestamp)) | - |
+| 3 | 调用 `purchaseTimestamps(purchaseId)` | 返回购买时的 block.timestamp（非零） |
+| 4 | 调用 `isInDisputeWindow(purchaseId)` | 在 disputeWindowSeconds 内返回 true |
+| 5 | 链上 warp 超过 disputeWindowSeconds 后再查 | 返回 false |
+
+### J-02 — 冷静期配置（协议管理员配合）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 协议管理员设置 `disputeWindowSeconds = 1 days` | 成功 |
+| 2 | 购买后 25 小时，查 isInDisputeWindow | 返回 false |
+| 3 | 协议管理员尝试设置 91 days | 报错，MAX_DISPUTE_WINDOW=90 days 上限保护 |
+
+### J-03 — 未来 DisputeModule 接入准备
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|---------|
+| 1 | 确认 purchaseTimestamps mapping 为 public | 可直接读取，无需额外授权 |
+| 2 | 确认 isInDisputeWindow() 为纯 view | 可以被 DisputeModule 合约安全调用，无状态副作用 |
+
+---
+
+## 附录：Worker API 验收速查
+
+| 接口 | 方法 | 验收要点 |
+|------|------|---------|
+| `/health` | GET | 返回 `{ok:true, services:{apiServer,indexer,db}}` |
+| `/config` | GET | 返回合约地址、链 ID、索引状态 |
+| `/purchases?buyer=0x...` | GET | 列出该买家购买记录，支持 shopId/itemId/source 过滤 |
+| `/purchases?source=db` | GET | 从 SQLite 返回历史记录（不限内存） |
+| `/shop-stats?shopId=1` | GET | 返回 totalPurchases/totalRevenue/uniqueBuyers，金额为字符串（BigInt 精度） |
+| `/serial-permit` | POST | 返回 EIP-712 SerialPermit；同 nonce 重复请求返回 409 |
+| `/risk-allowance` | POST | 返回 RiskAllowance；允许 shop 超过默认 item 上限 |
+| `/metrics` | GET | Prometheus 格式，含 indexer 指标 |
+
+---
+
+## 附录：本地回归一键验证
+
+```bash
+# 启动 anvil + 部署 + Worker + 购买流程
+./flow-test.sh
+
+# 含前端 E2E（需 Playwright）
+RUN_E2E=1 ./flow-test.sh
+
+# 仅合约测试（47 cases，含 C1–C11）
+cd contracts && forge test
+
+# Worker smoke tests
+cd worker && pnpm smoke:all
+```
+
+> **标签**：本节对应 git tag `v0.2.0-M1`，分支 `check-acceptance`。
