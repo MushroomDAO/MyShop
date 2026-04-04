@@ -287,47 +287,69 @@ export async function startPermitServer({
         });
         const serialHash = serialResult.serialHash;
 
-        // Check if nonce already issued by this server for this (itemId, buyer)
+        // INSERT as gate to prevent TOCTOU: unique constraint rejects concurrent duplicates
+        let nonceReserved = false;
         try {
           const db = openDb();
-          const existing = db
-            .prepare("SELECT 1 FROM issued_nonces WHERE item_id = ? AND buyer = ? AND nonce = ?")
-            .get(itemId.toString(), buyer.toLowerCase(), nonce.toString());
-          if (existing) {
+          const info = db
+            .prepare(
+              "INSERT OR IGNORE INTO issued_nonces_v2 (chain_id, item_id, buyer, nonce, issued_at) VALUES (?, ?, ?, ?, ?)"
+            )
+            .run(Number(domainChainId), itemId.toString(), buyer.toLowerCase(), nonce.toString(), 0);
+          if (info.changes === 0) {
             throw new HttpError({
               status: 409,
               code: "nonce_already_issued",
               message: "This nonce has already been issued for this buyer and item"
             });
           }
+          nonceReserved = true;
         } catch (e) {
           if (e instanceof HttpError) throw e;
-          // DB error is non-fatal for nonce check — log and continue
+          // DB error is non-fatal — proceed without nonce dedup
         }
 
-        const signature = await walletClients.serial.signTypedData({
-          domain: { name: "MyShop", version: "1", chainId: domainChainId, verifyingContract: getAddress(itemsAddress) },
-          types: {
-            SerialPermit: [
-              { name: "itemId", type: "uint256" },
-              { name: "buyer", type: "address" },
-              { name: "serialHash", type: "bytes32" },
-              { name: "deadline", type: "uint256" },
-              { name: "nonce", type: "uint256" }
-            ]
-          },
-          primaryType: "SerialPermit",
-          message: { itemId, buyer, serialHash, deadline, nonce }
-        });
-
-        // Persist the issued nonce
+        let signature;
         try {
-          const db = openDb();
-          db.prepare(
-            "INSERT OR IGNORE INTO issued_nonces (item_id, buyer, nonce, issued_at) VALUES (?, ?, ?, ?)"
-          ).run(itemId.toString(), buyer.toLowerCase(), nonce.toString(), Math.floor(Date.now() / 1000));
-        } catch {
-          // non-fatal: nonce is still recorded on-chain after buyer uses it
+          signature = await walletClients.serial.signTypedData({
+            domain: { name: "MyShop", version: "1", chainId: domainChainId, verifyingContract: getAddress(itemsAddress) },
+            types: {
+              SerialPermit: [
+                { name: "itemId", type: "uint256" },
+                { name: "buyer", type: "address" },
+                { name: "serialHash", type: "bytes32" },
+                { name: "deadline", type: "uint256" },
+                { name: "nonce", type: "uint256" }
+              ]
+            },
+            primaryType: "SerialPermit",
+            message: { itemId, buyer, serialHash, deadline, nonce }
+          });
+        } catch (e) {
+          // Signing failed — release the reserved nonce so it can be retried
+          if (nonceReserved) {
+            try {
+              const db = openDb();
+              db.prepare(
+                "DELETE FROM issued_nonces_v2 WHERE chain_id = ? AND item_id = ? AND buyer = ? AND nonce = ? AND issued_at = 0"
+              ).run(Number(domainChainId), itemId.toString(), buyer.toLowerCase(), nonce.toString());
+            } catch {
+              // best-effort cleanup
+            }
+          }
+          throw e;
+        }
+
+        // Mark nonce as fully issued (issued_at = now)
+        if (nonceReserved) {
+          try {
+            const db = openDb();
+            db.prepare(
+              "UPDATE issued_nonces_v2 SET issued_at = ? WHERE chain_id = ? AND item_id = ? AND buyer = ? AND nonce = ?"
+            ).run(Math.floor(Date.now() / 1000), Number(domainChainId), itemId.toString(), buyer.toLowerCase(), nonce.toString());
+          } catch {
+            // non-fatal: nonce is still recorded on-chain after buyer uses it
+          }
         }
 
         const extraData = encodeAbiParameters(

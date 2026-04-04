@@ -194,7 +194,7 @@ contract ItemConstraintsTest is Test {
         uint256 itemId = _addItemWith(0, 0, start, 0);
 
         vm.prank(buyer);
-        vm.expectRevert("NotYetAvailable");
+        vm.expectRevert(MyShopItems.NotYetAvailable.selector);
         items.buy(itemId, 1, recipient, "");
     }
 
@@ -218,7 +218,7 @@ contract ItemConstraintsTest is Test {
 
         vm.warp(block.timestamp + 2 days);
         vm.prank(buyer);
-        vm.expectRevert("SaleEnded");
+        vm.expectRevert(MyShopItems.SaleEnded.selector);
         items.buy(itemId, 1, recipient, "");
     }
 
@@ -245,7 +245,7 @@ contract ItemConstraintsTest is Test {
         uint256 itemId = _addItemWith(0, 0, start, end);
 
         vm.prank(buyer);
-        vm.expectRevert("NotYetAvailable");
+        vm.expectRevert(MyShopItems.NotYetAvailable.selector);
         items.buy(itemId, 1, recipient, "");
     }
 
@@ -256,7 +256,7 @@ contract ItemConstraintsTest is Test {
 
         vm.warp(block.timestamp + 3 days);
         vm.prank(buyer);
-        vm.expectRevert("SaleEnded");
+        vm.expectRevert(MyShopItems.SaleEnded.selector);
         items.buy(itemId, 1, recipient, "");
     }
 

@@ -16,6 +16,9 @@ export function openDb() {
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.pragma("synchronous = NORMAL");
+  db.pragma("busy_timeout = 5000");
+
+  // Base schema (new installs)
   db.exec(`
     CREATE TABLE IF NOT EXISTS purchases (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,14 +50,34 @@ export function openDb() {
       updated_at INTEGER NOT NULL DEFAULT 0
     );
 
-    CREATE TABLE IF NOT EXISTS issued_nonces (
+    -- issued_nonces_v2 includes chain_id; old issued_nonces (without chain_id) is migrated below
+    CREATE TABLE IF NOT EXISTS issued_nonces_v2 (
+      chain_id INTEGER NOT NULL,
       item_id TEXT NOT NULL,
       buyer TEXT NOT NULL,
       nonce TEXT NOT NULL,
       issued_at INTEGER NOT NULL,
-      PRIMARY KEY (item_id, buyer, nonce)
+      PRIMARY KEY (chain_id, item_id, buyer, nonce)
     );
   `);
+
+  // Migration: copy old issued_nonces (no chain_id) into issued_nonces_v2 with chain_id=0, then drop
+  const oldTableExists = db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='issued_nonces'")
+    .get();
+  if (oldTableExists) {
+    db.transaction(() => {
+      db.exec(`
+        INSERT OR IGNORE INTO issued_nonces_v2 (chain_id, item_id, buyer, nonce, issued_at)
+        SELECT 0, item_id, buyer, nonce, issued_at FROM issued_nonces;
+        DROP TABLE issued_nonces;
+      `);
+    })();
+  }
+
+  // Cleanup: delete pending nonces (issued_at=0) from previous crashed sessions.
+  // These represent sign operations that never completed and can safely be retried.
+  db.prepare("DELETE FROM issued_nonces_v2 WHERE issued_at = 0").run();
 
   _db = db;
   return db;

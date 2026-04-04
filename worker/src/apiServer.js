@@ -67,9 +67,6 @@ export async function startApiServer({ rpcUrl, chain, itemsAddress, port }) {
     persist: {
       enabled: process.env.INDEXER_PERSIST === "0" ? false : true,
       lastSavedAtMs: null,
-      saveInFlight: false,
-      saveScheduled: false,
-      saveTimer: null,
       errors: 0
     }
   };
@@ -769,33 +766,48 @@ function _topByValue(map, field, limit) {
   return list.slice(0, limit);
 }
 
-function _insertPurchase({ p, chainId }) {
+// Atomically persist a batch of purchases + advance last_block in one transaction
+function _persistPurchaseBatch({ purchases, toBlock, chainId }) {
   try {
     const db = openDb();
-    db.prepare(
+    const insertPurchase = db.prepare(
       `INSERT OR IGNORE INTO purchases
          (shop_id, item_id, buyer, recipient, token_id, serial_hash, quantity,
           tx_hash, log_index, block_number, timestamp, chain_id, pay_token, pay_amount, platform_fee_amount)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      p.shopId ?? "",
-      p.itemId ?? "",
-      p.buyer ?? "",
-      p.recipient ?? "",
-      p.firstTokenId ?? null,
-      p.serialHash ?? null,
-      p.quantity ?? "1",
-      p.txHash ?? "",
-      p.logIndex ?? 0,
-      p.blockNumber ?? 0,
-      0,
-      Number(chainId),
-      p.payToken ?? null,
-      p.payAmount ?? null,
-      p.platformFeeAmount ?? null
     );
+    const upsertState = db.prepare(
+      `INSERT INTO indexer_state (chain_id, last_block, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(chain_id) DO UPDATE SET last_block = excluded.last_block, updated_at = excluded.updated_at`
+    );
+    const nowSec = Math.floor(Date.now() / 1000);
+    db.transaction(() => {
+      for (const p of purchases) {
+        insertPurchase.run(
+          p.shopId ?? "",
+          p.itemId ?? "",
+          p.buyer ?? "",
+          p.recipient ?? "",
+          p.firstTokenId ?? null,
+          p.serialHash ?? null,
+          p.quantity ?? "1",
+          p.txHash ?? "",
+          p.logIndex ?? 0,
+          p.blockNumber ?? 0,
+          0,
+          Number(chainId),
+          p.payToken ?? null,
+          p.payAmount ?? null,
+          p.platformFeeAmount ?? null
+        );
+      }
+      upsertState.run(Number(chainId), Number(toBlock), nowSec);
+    })();
+    return true;
   } catch {
     // non-fatal: in-memory array is still the source of truth for queries
+    return false;
   }
 }
 
@@ -844,36 +856,6 @@ function _loadIndexerState({ indexer, chainId, itemsAddress }) {
   }
 }
 
-function _schedulePersistIndexerState({ indexer, chainId, itemsAddress }) {
-  if (!indexer.persist.enabled) return;
-  if (indexer.persist.saveScheduled) return;
-
-  indexer.persist.saveScheduled = true;
-  indexer.persist.saveTimer = setTimeout(() => {
-    indexer.persist.saveScheduled = false;
-    _persistIndexerState({ indexer, chainId, itemsAddress });
-  }, 200);
-}
-
-function _persistIndexerState({ indexer, chainId, itemsAddress }) {
-  if (!indexer.persist.enabled) return;
-
-  try {
-    const db = openDb();
-    const nowSec = Math.floor(Date.now() / 1000);
-    const lastBlock = indexer.lastIndexedBlock != null ? Number(indexer.lastIndexedBlock) : 0;
-
-    db.prepare(
-      `INSERT INTO indexer_state (chain_id, last_block, updated_at)
-       VALUES (?, ?, ?)
-       ON CONFLICT(chain_id) DO UPDATE SET last_block = excluded.last_block, updated_at = excluded.updated_at`
-    ).run(Number(chainId), lastBlock, nowSec);
-
-    indexer.persist.lastSavedAtMs = Date.now();
-  } catch {
-    indexer.persist.errors += 1;
-  }
-}
 
 function _decodePurchasedLog({ chainId, log }) {
   const decoded = decodeEventLog({
@@ -1004,6 +986,7 @@ async function _startIndexer({ client, chainId, itemsAddress, cache, indexer }) 
 
       indexer.lastLogsCount = logs.length;
       indexer.totalLogs += logs.length;
+      const newPurchases = [];
       for (const log of logs) {
         const key = `${log.transactionHash}:${log.logIndex}`;
         if (indexer.purchaseKeys.has(key)) continue;
@@ -1011,10 +994,7 @@ async function _startIndexer({ client, chainId, itemsAddress, cache, indexer }) 
 
         const p = _decodePurchasedLog({ chainId, log });
         indexer.purchases.push(p);
-
-        if (indexer.persist.enabled) {
-          _insertPurchase({ p, chainId });
-        }
+        newPurchases.push(p);
 
         if (indexer.purchases.length > indexer.maxRecords) {
           const removed = indexer.purchases.splice(0, indexer.purchases.length - indexer.maxRecords);
@@ -1024,7 +1004,12 @@ async function _startIndexer({ client, chainId, itemsAddress, cache, indexer }) 
 
       indexer.lastIndexedBlock = toBlock;
       _trimPurchasesToWindow(indexer);
-      _schedulePersistIndexerState({ indexer, chainId, itemsAddress });
+
+      // Atomically persist new purchases + last_block in one transaction
+      if (indexer.persist.enabled) {
+        _persistPurchaseBatch({ purchases: newPurchases, toBlock, chainId });
+        indexer.persist.lastSavedAtMs = Date.now();
+      }
       if (indexer.consecutiveErrors > 0) {
         indexer.recoveredFromErrorCount += 1;
         indexer.lastRecoveryAtMs = Date.now();

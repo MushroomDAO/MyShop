@@ -240,6 +240,7 @@ contract MyShopItems {
         if (!shops.hasShopRole(p.shopId, msg.sender, ROLE_ITEM_EDITOR)) revert NotShopOwner();
         if (p.nftContract == address(0) || p.unitPrice == 0) revert InvalidAddress();
         if (p.action != address(0) && !allowedActions[p.action]) revert ActionNotAllowed();
+        if (p.endTime > 0 && p.startTime > 0 && p.endTime <= p.startTime) revert SaleEnded();
 
         _enforceItemLimit(shopOwner, p.shopId, p.maxItems, p.deadline, p.nonce, p.signature);
 
@@ -354,9 +355,9 @@ contract MyShopItems {
         // C3: item-level pause
         if (item.paused) revert ItemPausedError();
 
-        // C2: time window checks
-        if (item.startTime > 0) require(block.timestamp >= item.startTime, "NotYetAvailable");
-        if (item.endTime > 0) require(block.timestamp <= item.endTime, "SaleEnded");
+        // C2: time window checks (custom errors, not require strings)
+        if (item.startTime > 0 && block.timestamp < item.startTime) revert NotYetAvailable();
+        if (item.endTime > 0 && block.timestamp > item.endTime) revert SaleEnded();
 
         // C1: inventory and per-wallet checks
         if (item.maxSupply > 0) {
@@ -371,6 +372,10 @@ contract MyShopItems {
             serialHash = _verifySerial(itemId, msg.sender, extraData);
         }
 
+        // CEI: update state before external calls to prevent reentrancy
+        itemSoldCount[itemId] += quantity;
+        walletPurchaseCount[itemId][recipient] += quantity;
+
         uint256 payAmount;
         uint256 platformFeeAmount;
         {
@@ -378,10 +383,6 @@ contract MyShopItems {
             platformFeeAmount = (payAmount * shops.platformFeeBps()) / 10000;
             _collectPayment(item.payToken, payAmount, platformFeeAmount, shopTreasury);
         }
-
-        // C1: increment counters after successful payment
-        itemSoldCount[itemId] += quantity;
-        walletPurchaseCount[itemId][recipient] += quantity;
 
         firstTokenId = _mintNft(item.nftContract, recipient, item.tokenURI, item.soulbound, quantity);
 
