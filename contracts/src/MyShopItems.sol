@@ -51,6 +51,9 @@ contract MyShopItems {
     uint256 public disputeWindowSeconds = 7 days;
     mapping(bytes32 => uint256) public purchaseTimestamps;
 
+    // Reentrancy guard for buy() — prevents re-entrancy via ERC721 onReceived or action callbacks
+    uint256 private _buyLock = 1;
+
     struct Item {
         uint256 shopId;
         address payToken;
@@ -258,15 +261,12 @@ contract MyShopItems {
     }
 
     // C7: shop treasury withdrawal — recovers stuck ERC20 by sending to the shop's own treasury.
-    // Destination is locked to shopTreasury to prevent a maintainer from stealing funds.
-    // Only the protocol owner or a shop ROLE_ITEM_MAINTAINER may call this.
-    function withdrawShopBalance(uint256 shopId, address token) external {
+    // Restricted to protocol owner only: the contract holds pooled funds (all shops share one balance),
+    // so a per-shop maintainer role would allow draining other shops' accumulated fees.
+    function withdrawShopBalance(uint256 shopId, address token) external onlyOwner {
         if (token == address(0)) revert InvalidAddress();
         (, address shopTreasury,, ) = shops.shops(shopId);
         if (shopTreasury == address(0)) revert InvalidAddress();
-        if (msg.sender != owner && !shops.hasShopRole(shopId, msg.sender, ROLE_ITEM_MAINTAINER)) {
-            revert NotShopOwner();
-        }
         uint256 bal = IERC20(token).balanceOf(address(this));
         if (bal == 0) return;
         bool ok = IERC20(token).transfer(shopTreasury, bal);
@@ -443,6 +443,8 @@ contract MyShopItems {
         payable
         returns (uint256 firstTokenId)
     {
+        require(_buyLock == 1, "reentrant");
+        _buyLock = 2;
         if (quantity == 0) revert InvalidPayment();
         if (recipient == address(0)) revert InvalidAddress();
 
@@ -521,6 +523,7 @@ contract MyShopItems {
             firstTokenId: firstTokenId
         });
         _emitPurchased(rec);
+        _buyLock = 1;
     }
 
     function _emitPurchased(PurchaseRecord memory rec) internal {

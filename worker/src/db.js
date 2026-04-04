@@ -75,9 +75,12 @@ export function openDb() {
     })();
   }
 
-  // Cleanup: delete pending nonces (issued_at=0) from previous crashed sessions.
-  // These represent sign operations that never completed and can safely be retried.
-  db.prepare("DELETE FROM issued_nonces_v2 WHERE issued_at = 0").run();
+  // Note: we intentionally do NOT delete issued_at=0 rows on startup.
+  // If a process crashed between INSERT and the final UPDATE (issued_at=now),
+  // the signed permit may already be in the client's hands. Deleting the row
+  // would allow the same nonce to be reissued, creating two valid permits for
+  // the same nonce (only one can be used on-chain, but it's a cleaner invariant
+  // to treat any inserted row as permanently consumed).
 
   _db = db;
   return db;
