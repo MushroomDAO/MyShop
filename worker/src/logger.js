@@ -7,6 +7,14 @@
 const JSON_MODE = process.env.LOG_FORMAT === "json";
 const SERVICE = process.env.LOG_SERVICE || process.env.SERVICE_NAME || "worker";
 
+function _safeStringify(obj) {
+  try {
+    return JSON.stringify(obj, (_k, v) => (typeof v === "bigint" ? v.toString() + "n" : v));
+  } catch {
+    return String(obj);
+  }
+}
+
 function _write(level, msg, extra) {
   const ts = Math.floor(Date.now() / 1000);
   if (JSON_MODE) {
@@ -14,14 +22,16 @@ function _write(level, msg, extra) {
     if (extra && typeof extra === "object") {
       for (const [k, v] of Object.entries(extra)) {
         if (k !== "ts" && k !== "level" && k !== "service" && k !== "msg") {
-          entry[k] = v;
+          entry[k] = typeof v === "bigint" ? v.toString() + "n" : v;
         }
       }
     }
-    process.stdout.write(JSON.stringify(entry) + "\n");
+    process.stdout.write(_safeStringify(entry) + "\n");
   } else {
     const prefix = `[${new Date(ts * 1000).toISOString()}] [${level.toUpperCase()}]`;
-    const extraStr = extra && Object.keys(extra).length > 0 ? " " + JSON.stringify(extra) : "";
+    const extraStr = extra && typeof extra === "object" && Object.keys(extra).length > 0
+      ? " " + _safeStringify(extra)
+      : "";
     const out = `${prefix} ${msg}${extraStr}\n`;
     if (level === "error" || level === "warn") {
       process.stderr.write(out);

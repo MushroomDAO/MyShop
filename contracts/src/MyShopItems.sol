@@ -328,6 +328,8 @@ contract MyShopItems {
         if (!shops.hasShopRole(item.shopId, msg.sender, ROLE_ITEM_EDITOR)) revert NotShopOwner();
         if (p.nftContract == address(0) || p.unitPrice == 0) revert InvalidAddress();
         if (p.endTime > 0 && p.startTime > 0 && p.endTime <= p.startTime) revert SaleEnded();
+        // C9: cannot lower maxSupply below already-sold count
+        if (p.maxSupply > 0 && p.maxSupply < itemSoldCount[itemId]) revert ExceedsMaxSupply();
 
         item.payToken = p.payToken;
         item.unitPrice = p.unitPrice;
