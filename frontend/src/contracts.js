@@ -402,6 +402,43 @@ export const myShopItemsAbi = [
       { name: "contentHash", type: "bytes32" },
       { name: "uri", type: "string" }
     ]
+  },
+  {
+    type: "function",
+    name: "withdrawShopBalance",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "shopId", type: "uint256" },
+      { name: "token", type: "address" }
+    ],
+    outputs: []
+  },
+  {
+    type: "function",
+    name: "rescueETH",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "to", type: "address" }],
+    outputs: []
+  },
+  {
+    type: "function",
+    name: "rescueERC20",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "token", type: "address" },
+      { name: "to", type: "address" }
+    ],
+    outputs: []
+  },
+  {
+    type: "event",
+    name: "ShopBalanceWithdrawn",
+    inputs: [
+      { name: "shopId", type: "uint256", indexed: true },
+      { name: "token", type: "address", indexed: true },
+      { name: "to", type: "address", indexed: false },
+      { name: "amount", type: "uint256", indexed: false }
+    ]
   }
 ];
 

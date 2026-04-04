@@ -1919,6 +1919,26 @@ async function importShopItemsTx() {
   setText("txOut", "import done");
 }
 
+async function withdrawShopBalanceTx() {
+  if (!walletClient || !connectedAddress) throw new Error("connect wallet first");
+  const itemsAddress = requireAddress(val("itemsAddress"), "itemsAddress");
+  const shopId = BigInt(val("shopIdWithdraw"));
+  const token = requireAddress(val("withdrawToken"), "token");
+  return runWriteTx({
+    label: "withdrawShopBalance",
+    buttonIds: ["btnWithdrawShopBalance"],
+    write: () =>
+      walletClient.writeContract({
+        address: itemsAddress,
+        abi: myShopItemsAbi,
+        functionName: "withdrawShopBalance",
+        args: [shopId, token],
+        account: connectedAddress
+      }),
+    onStatus: (s) => setText("withdrawBalanceOut", s)
+  });
+}
+
 let routeState = { buyerItemId: null };
 let lastServiceCheckAtMs = 0;
 let lastServiceStatusText = "";
@@ -3526,6 +3546,27 @@ async function renderShopConsole(container, query = {}) {
         onclick: () =>
           guardShop({ shopIdInputId: "shopIdPause", anyRolesMask: roleMaskShopAdmin })(() => setShopPausedTx()).catch(showTxError)
       })
+    ])
+  );
+
+  container.appendChild(el("hr"));
+
+  // F6: 收益提取 UI — withdrawShopBalance sends accumulated token balance to shopTreasury
+  container.appendChild(
+    el("div", {}, [
+      el("h3", { text: "Withdraw Shop Balance (shop admin / maintainer)" }),
+      el("div", { style: "color: #6b7280; font-size: 0.9em; margin-bottom: 8px;" }, [
+        el("span", { text: "将本合约中该 Shop 累计的代币余额转入 shopTreasury。需要 shop admin 或 item maintainer 权限。" })
+      ]),
+      inputRow("shopId", "shopIdWithdraw", query.shopId || "1"),
+      inputRow("token (ERC20 address)", "withdrawToken"),
+      el("button", {
+        id: "btnWithdrawShopBalance",
+        text: "Withdraw to Treasury",
+        onclick: () =>
+          guardShop({ shopIdInputId: "shopIdWithdraw", anyRolesMask: roleMaskMaintainer })(() => withdrawShopBalanceTx()).catch(showTxError)
+      }),
+      el("pre", { id: "withdrawBalanceOut", style: "margin-top: 6px;" })
     ])
   );
 
