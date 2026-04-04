@@ -763,33 +763,46 @@ async function _getPurchasesFromDb({ client, chainId, itemsAddress, buyer, shopI
       enriched.push({ ...p, item, shop });
     }
     return enriched;
-  } catch {
-    return [];
+  } catch (e) {
+    // Re-throw so the HTTP handler can return a proper error response
+    throw Object.assign(new Error("db_query_failed: " + (e?.message ?? "unknown")), { code: "db_error" });
   }
 }
 
 // W5: aggregate shop stats from SQLite
+// Revenue/fees stored as TEXT strings (wei-scale integers) — sum in JS with BigInt to avoid REAL precision loss
 function _getShopStatsFromDb({ chainId, shopId }) {
   try {
     const db = openDb();
-    const row = db.prepare(`
+    // Quantities are safe to sum as integers; amounts are text wei-values, sum in JS
+    const countRow = db.prepare(`
       SELECT COUNT(*) AS total_purchases,
              SUM(CAST(quantity AS INTEGER)) AS total_quantity,
-             SUM(CAST(pay_amount AS REAL)) AS total_revenue,
-             SUM(CAST(platform_fee_amount AS REAL)) AS total_platform_fees,
              COUNT(DISTINCT buyer) AS unique_buyers,
              MAX(block_number) AS last_block
       FROM purchases WHERE chain_id = ? AND shop_id = ?
     `).get(Number(chainId), shopId.toString());
 
+    const amountRows = db.prepare(`
+      SELECT pay_amount, platform_fee_amount
+      FROM purchases WHERE chain_id = ? AND shop_id = ?
+    `).all(Number(chainId), shopId.toString());
+
+    let totalRevenue = 0n;
+    let totalPlatformFees = 0n;
+    for (const r of amountRows) {
+      try { totalRevenue += BigInt(r.pay_amount ?? "0"); } catch {}
+      try { totalPlatformFees += BigInt(r.platform_fee_amount ?? "0"); } catch {}
+    }
+
     return {
       source: "db",
-      totalPurchases: row ? Number(row.total_purchases) : 0,
-      totalQuantity: row ? Number(row.total_quantity ?? 0) : 0,
-      totalRevenue: row ? String(Math.round(row.total_revenue ?? 0)) : "0",
-      totalPlatformFees: row ? String(Math.round(row.total_platform_fees ?? 0)) : "0",
-      uniqueBuyers: row ? Number(row.unique_buyers) : 0,
-      lastPurchaseBlock: row?.last_block ?? null
+      totalPurchases: countRow ? Number(countRow.total_purchases) : 0,
+      totalQuantity: countRow ? Number(countRow.total_quantity ?? 0) : 0,
+      totalRevenue: totalRevenue.toString(),
+      totalPlatformFees: totalPlatformFees.toString(),
+      uniqueBuyers: countRow ? Number(countRow.unique_buyers) : 0,
+      lastPurchaseBlock: countRow?.last_block ?? null
     };
   } catch {
     return { source: "db", error: "db_unavailable" };

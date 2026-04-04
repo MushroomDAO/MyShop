@@ -230,21 +230,21 @@ contract MyShopItems {
         emit ItemStatusChanged(itemId, active);
     }
 
-    // C7: shop treasury withdrawal — shop owner recovers accumulated ERC20 in this contract
-    // (ETH is pushed directly; ERC20 flows through this contract atomically but may accumulate
-    //  if a token reverts on forward — this provides a safe recovery path)
-    function withdrawShopBalance(uint256 shopId, address token, address to) external {
-        (address shopOwner,,,) = shops.shops(shopId);
-        if (shopOwner == address(0)) revert InvalidAddress();
+    // C7: shop treasury withdrawal — recovers stuck ERC20 by sending to the shop's own treasury.
+    // Destination is locked to shopTreasury to prevent a maintainer from stealing funds.
+    // Only the protocol owner or a shop ROLE_ITEM_MAINTAINER may call this.
+    function withdrawShopBalance(uint256 shopId, address token) external {
+        if (token == address(0)) revert InvalidAddress();
+        (, address shopTreasury,, ) = shops.shops(shopId);
+        if (shopTreasury == address(0)) revert InvalidAddress();
         if (msg.sender != owner && !shops.hasShopRole(shopId, msg.sender, ROLE_ITEM_MAINTAINER)) {
             revert NotShopOwner();
         }
-        if (to == address(0)) revert InvalidAddress();
         uint256 bal = IERC20(token).balanceOf(address(this));
         if (bal == 0) return;
-        bool ok = IERC20(token).transfer(to, bal);
+        bool ok = IERC20(token).transfer(shopTreasury, bal);
         if (!ok) revert TransferFailed();
-        emit ShopBalanceWithdrawn(shopId, token, to, bal);
+        emit ShopBalanceWithdrawn(shopId, token, shopTreasury, bal);
     }
 
     // C8: protocol treasury withdrawal — owner rescues stuck ETH or ERC20 from contract
@@ -375,7 +375,9 @@ contract MyShopItems {
     }
 
     // C11: dispute window config (owner can adjust; per-shop override comes in M4 DisputeModule)
+    uint256 public constant MAX_DISPUTE_WINDOW = 90 days;
     function setDisputeWindowSeconds(uint256 seconds_) external onlyOwner {
+        if (seconds_ > MAX_DISPUTE_WINDOW) revert InvalidPayment(); // reuse error; window > 90 days not allowed
         disputeWindowSeconds = seconds_;
     }
 
@@ -443,7 +445,8 @@ contract MyShopItems {
         firstTokenId = _mintNft(item.nftContract, recipient, item.tokenURI, item.soulbound, quantity);
 
         // C11: record purchase timestamp for dispute window (DisputeModule M4)
-        bytes32 purchaseId = keccak256(abi.encode(itemId, firstTokenId));
+        // Include buyer+timestamp+firstTokenId to avoid collision when NFT contract reuses IDs
+        bytes32 purchaseId = keccak256(abi.encode(itemId, firstTokenId, msg.sender, block.timestamp));
         purchaseTimestamps[purchaseId] = block.timestamp;
 
         {
