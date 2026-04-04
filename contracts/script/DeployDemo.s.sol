@@ -63,7 +63,11 @@ contract DeployDemo is Script {
             maxItems: 0,
             deadline: 0,
             nonce: 0,
-            signature: bytes("")
+            signature: bytes(""),
+            maxSupply: 0,
+            perWallet: 0,
+            startTime: 0,
+            endTime: 0
         });
 
         uint256 itemId = items.addItem(p);

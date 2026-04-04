@@ -86,7 +86,11 @@ contract MyShopFlowTest is Test {
             maxItems: maxItems,
             deadline: deadline,
             nonce: nonce,
-            signature: signature
+            signature: signature,
+            maxSupply: 0,
+            perWallet: 0,
+            startTime: 0,
+            endTime: 0
         });
         itemId = items.addItem(p);
     }
@@ -139,7 +143,11 @@ contract MyShopFlowTest is Test {
             maxItems: 0,
             deadline: 0,
             nonce: 0,
-            signature: bytes("")
+            signature: bytes(""),
+            maxSupply: 0,
+            perWallet: 0,
+            startTime: 0,
+            endTime: 0
         });
 
         vm.prank(community);
@@ -213,7 +221,7 @@ contract MyShopFlowTest is Test {
 
         vm.prank(operator);
         items.setItemActive(itemId, false);
-        (, , , , , , , , , bool activeAfter) = items.items(itemId);
+        bool activeAfter = items.getItem(itemId).active;
         assertEq(activeAfter, false);
 
         vm.prank(operator);

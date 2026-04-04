@@ -37,6 +37,10 @@ contract MyShopItems {
 
     uint256 public itemCount;
 
+    // C1: sold count and per-wallet purchase count
+    mapping(uint256 => uint256) public itemSoldCount;
+    mapping(uint256 => mapping(address => uint256)) public walletPurchaseCount;
+
     struct Item {
         uint256 shopId;
         address payToken;
@@ -48,6 +52,14 @@ contract MyShopItems {
         bytes actionData;
         bool requiresSerial;
         bool active;
+        // C1: inventory constraints
+        uint256 maxSupply;
+        uint32 perWallet;
+        // C2: time window
+        uint64 startTime;
+        uint64 endTime;
+        // C3: item-level pause
+        bool paused;
     }
 
     struct ItemPage {
@@ -99,9 +111,15 @@ contract MyShopItems {
         uint256 deadline;
         uint256 nonce;
         bytes signature;
+        // C1: inventory constraints
+        uint256 maxSupply;
+        uint32 perWallet;
+        // C2: time window
+        uint64 startTime;
+        uint64 endTime;
     }
 
-    mapping(uint256 => Item) public items;
+    mapping(uint256 => Item) internal _items;
     mapping(uint256 => uint256) public shopItemCount;
     mapping(uint256 => uint256) public itemPageCount;
     mapping(uint256 => uint256) public itemDefaultPageVersion;
@@ -117,6 +135,8 @@ contract MyShopItems {
     event ItemActionUpdated(uint256 indexed itemId, address indexed action);
     event ItemPageVersionAdded(uint256 indexed itemId, uint256 indexed version, bytes32 contentHash, string uri);
     event ItemDefaultPageVersionSet(uint256 indexed itemId, uint256 indexed version);
+    // C3: item pause event
+    event ItemPaused(uint256 indexed itemId, bool paused);
     event Purchased(
         uint256 indexed itemId,
         uint256 indexed shopId,
@@ -146,6 +166,14 @@ contract MyShopItems {
     error ActionNotAllowed();
     error InvalidVersion();
     error InvalidURI();
+    // C1
+    error ExceedsMaxSupply();
+    error ExceedsPerWallet();
+    // C2
+    error NotYetAvailable();
+    error SaleEnded();
+    // C3
+    error ItemPausedError();
 
     constructor(address shops_, address riskSigner_, address serialSigner_) {
         if (shops_ == address(0)) revert InvalidAddress();
@@ -185,13 +213,24 @@ contract MyShopItems {
     }
 
     function setItemActive(uint256 itemId, bool active) external {
-        Item storage item = items[itemId];
+        Item storage item = _items[itemId];
         if (!item.active && item.shopId == 0) revert ItemNotFound();
         if (msg.sender != owner && !shops.hasShopRole(item.shopId, msg.sender, ROLE_ITEM_MAINTAINER)) {
             revert NotShopOwner();
         }
         item.active = active;
         emit ItemStatusChanged(itemId, active);
+    }
+
+    // C3: pause/unpause individual item
+    function pauseItem(uint256 itemId, bool pause) external {
+        Item storage item = _items[itemId];
+        if (!item.active && item.shopId == 0) revert ItemNotFound();
+        if (msg.sender != owner && !shops.hasShopRole(item.shopId, msg.sender, ROLE_ITEM_MAINTAINER)) {
+            revert NotShopOwner();
+        }
+        item.paused = pause;
+        emit ItemPaused(itemId, pause);
     }
 
     function addItem(AddItemParams calldata p) external returns (uint256 itemId) {
@@ -212,7 +251,7 @@ contract MyShopItems {
         }
 
         itemId = ++itemCount;
-        items[itemId] = Item({
+        _items[itemId] = Item({
             shopId: p.shopId,
             payToken: p.payToken,
             unitPrice: p.unitPrice,
@@ -222,7 +261,12 @@ contract MyShopItems {
             action: p.action,
             actionData: p.actionData,
             requiresSerial: p.requiresSerial,
-            active: true
+            active: true,
+            maxSupply: p.maxSupply,
+            perWallet: p.perWallet,
+            startTime: p.startTime,
+            endTime: p.endTime,
+            paused: false
         });
         shopItemCount[p.shopId] += 1;
 
@@ -230,7 +274,7 @@ contract MyShopItems {
     }
 
     function updateItem(uint256 itemId, UpdateItemParams calldata p) external {
-        Item storage item = items[itemId];
+        Item storage item = _items[itemId];
         if (!item.active && item.shopId == 0) revert ItemNotFound();
         if (!shops.hasShopRole(item.shopId, msg.sender, ROLE_ITEM_EDITOR)) revert NotShopOwner();
         if (p.nftContract == address(0) || p.unitPrice == 0) revert InvalidAddress();
@@ -246,7 +290,7 @@ contract MyShopItems {
     }
 
     function updateItemAction(uint256 itemId, address action, bytes calldata actionData) external {
-        Item storage item = items[itemId];
+        Item storage item = _items[itemId];
         if (!item.active && item.shopId == 0) revert ItemNotFound();
         if (!shops.hasShopRole(item.shopId, msg.sender, ROLE_ITEM_ACTION_EDITOR)) revert NotShopOwner();
         if (action != address(0) && !allowedActions[action]) revert ActionNotAllowed();
@@ -260,7 +304,7 @@ contract MyShopItems {
         external
         returns (uint256 version)
     {
-        Item storage item = items[itemId];
+        Item storage item = _items[itemId];
         if (!item.active && item.shopId == 0) revert ItemNotFound();
         if (!shops.hasShopRole(item.shopId, msg.sender, ROLE_ITEM_EDITOR)) revert NotShopOwner();
         if (bytes(uri).length == 0) revert InvalidURI();
@@ -273,13 +317,17 @@ contract MyShopItems {
     }
 
     function setItemDefaultPageVersion(uint256 itemId, uint256 version) external {
-        Item storage item = items[itemId];
+        Item storage item = _items[itemId];
         if (!item.active && item.shopId == 0) revert ItemNotFound();
         if (!shops.hasShopRole(item.shopId, msg.sender, ROLE_ITEM_EDITOR)) revert NotShopOwner();
         if (version == 0 || version > itemPageCount[itemId]) revert InvalidVersion();
 
         itemDefaultPageVersion[itemId] = version;
         emit ItemDefaultPageVersionSet(itemId, version);
+    }
+
+    function getItem(uint256 itemId) external view returns (Item memory) {
+        return _items[itemId];
     }
 
     function getItemPage(uint256 itemId, uint256 version) external view returns (bytes32 contentHash, string memory uri) {
@@ -296,12 +344,27 @@ contract MyShopItems {
         if (quantity == 0) revert InvalidPayment();
         if (recipient == address(0)) revert InvalidAddress();
 
-        Item storage item = items[itemId];
+        Item storage item = _items[itemId];
         if (!item.active && item.shopId == 0) revert ItemNotFound();
         if (!item.active) revert ItemInactive();
 
         (, address shopTreasury,, bool shopPaused) = shops.shops(item.shopId);
         if (shopPaused) revert ShopPaused();
+
+        // C3: item-level pause
+        if (item.paused) revert ItemPausedError();
+
+        // C2: time window checks
+        if (item.startTime > 0) require(block.timestamp >= item.startTime, "NotYetAvailable");
+        if (item.endTime > 0) require(block.timestamp <= item.endTime, "SaleEnded");
+
+        // C1: inventory and per-wallet checks
+        if (item.maxSupply > 0) {
+            if (itemSoldCount[itemId] + quantity > item.maxSupply) revert ExceedsMaxSupply();
+        }
+        if (item.perWallet > 0) {
+            if (walletPurchaseCount[itemId][recipient] + quantity > item.perWallet) revert ExceedsPerWallet();
+        }
 
         bytes32 serialHash = bytes32(0);
         if (item.requiresSerial) {
@@ -315,6 +378,10 @@ contract MyShopItems {
             platformFeeAmount = (payAmount * shops.platformFeeBps()) / 10000;
             _collectPayment(item.payToken, payAmount, platformFeeAmount, shopTreasury);
         }
+
+        // C1: increment counters after successful payment
+        itemSoldCount[itemId] += quantity;
+        walletPurchaseCount[itemId][recipient] += quantity;
 
         firstTokenId = _mintNft(item.nftContract, recipient, item.tokenURI, item.soulbound, quantity);
 
