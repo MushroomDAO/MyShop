@@ -2519,56 +2519,126 @@ async function renderRiskPage(container) {
 }
 
 async function renderShopDetail(container, shopId) {
-  container.appendChild(el("h2", { text: `Shop #${shopId}` }));
-  const out = el("div", { id: "shopDetailOut" });
-  const itemsBox = el("div", { id: "shopItemsBox" });
-  container.appendChild(out);
-  container.appendChild(itemsBox);
+  // Header
+  const header = el("div", { class: "section-header" }, [
+    el("h2", { text: `兑换柜台 #${shopId}` }),
+    el("a", { href: "#/plaza", text: "← 广场", style: "font-size:0.9em" })
+  ]);
+  container.appendChild(header);
 
-  const shop = await fetchShop(shopId);
-  out.appendChild(kv("source", String(shop.__source || "")));
-  out.appendChild(kv("owner", addressNode(shop.owner)));
-  out.appendChild(kv("treasury", addressNode(shop.treasury)));
-  out.appendChild(kv("metadataHash", shortHex(shop.metadataHash)));
-  out.appendChild(kv("paused", String(shop.paused)));
+  // Shop info card
+  const infoCard = el("div", { class: "card", id: "shopInfoCard", style: "margin-bottom:12px" });
+  container.appendChild(infoCard);
 
-  itemsBox.appendChild(el("h3", { text: "Items (scan first N items)" }));
-  itemsBox.appendChild(inputRow("scan limit", "shopItemScanLimit", "200"));
-  itemsBox.appendChild(
-    el("button", {
-      text: "Scan",
-      onclick: () => scan().catch(showTxError)
-    })
-  );
-  const list = el("div", { id: "shopItemsList" });
-  itemsBox.appendChild(list);
+  // Stats card
+  const statsCard = el("div", { class: "card", id: "shopStatsCard", style: "margin-bottom:12px" });
+  statsCard.appendChild(el("div", { text: "加载统计中...", style: "color:#999" }));
+  container.appendChild(statsCard);
 
-  async function scan() {
-    list.innerHTML = "";
-    const scanLimit = Number(val("shopItemScanLimit") || "200");
-    const { items } = await fetchItemList({ cursor: 1n, limit: scanLimit });
-    const filtered = items.filter((x) => String(x.item.shopId) === String(shopId));
-    if (filtered.length === 0) {
-      list.appendChild(el("div", { text: "No items found for this shop in scanned range." }));
-      setText("txOut", "shop items: 0");
-      return;
-    }
-    list.appendChild(el("div", { text: `loaded: items(${filtered.length}) ${sourceCountsLabel(filtered, (it) => it?.item?.__source)}` }));
-    for (const it of filtered) {
-      const item = it.item;
-      list.appendChild(
-        el("div", {}, [
-          el("a", { href: `#/item/${it.itemId}`, text: `Item #${it.itemId}` }),
-          el("span", {
-            text: formatItemSummary(item, { includeShopId: false })
-          })
-        ])
-      );
-    }
-    setText("txOut", `shop items: ${filtered.length}`);
+  // Items section
+  const itemsSection = el("div", {});
+  const itemsTitle = el("h3", { text: "可兑换项目" });
+  const itemsGrid = el("div", { id: "shopItemsGrid", style: "display:flex;flex-wrap:wrap;gap:12px" });
+  itemsSection.appendChild(itemsTitle);
+  itemsSection.appendChild(itemsGrid);
+  container.appendChild(itemsSection);
+
+  // Load shop info
+  let shop;
+  try {
+    shop = await fetchShop(shopId);
+  } catch (e) {
+    infoCard.appendChild(el("div", { text: `加载失败: ${e.message}`, style: "color:red" }));
+    return;
   }
 
-  await scan();
+  if (shop.paused) {
+    infoCard.appendChild(el("div", {
+      text: "⚠️ 此柜台已暂停",
+      style: "background:#fff3cd;padding:8px;border-radius:4px;margin-bottom:8px"
+    }));
+  }
+  infoCard.appendChild(kv("柜台ID", shopId));
+  infoCard.appendChild(kv("所有者", addressNode(shop.owner)));
+  infoCard.appendChild(kv("Treasury", addressNode(shop.treasury)));
+  infoCard.appendChild(kv("Metadata Hash", shortHex(shop.metadataHash)));
+  infoCard.appendChild(kv("状态", shop.paused ? "🔴 暂停" : "🟢 运营中"));
+
+  // Load stats async
+  const workerApiUrl = getCurrentCfgValue("workerApiUrl");
+  if (workerApiUrl) {
+    (async () => {
+      try {
+        const statsRes = await fetch(`${workerApiUrl}/shop-stats?shopId=${shopId}`);
+        const statsJson = await statsRes.json();
+        statsCard.innerHTML = "";
+        if (statsJson.ok && statsJson.stats) {
+          const s = statsJson.stats;
+          statsCard.appendChild(el("h4", { text: "统计数据", style: "margin:0 0 8px" }));
+          const statsRow = el("div", { style: "display:flex;gap:24px;flex-wrap:wrap" });
+          statsRow.appendChild(el("div", {}, [el("div", { text: String(s.totalPurchases || 0), style: "font-size:1.4em;font-weight:bold" }), el("div", { text: "成交笔数", style: "color:#888;font-size:0.85em" })]));
+          statsRow.appendChild(el("div", {}, [el("div", { text: String(s.uniqueBuyers || 0), style: "font-size:1.4em;font-weight:bold" }), el("div", { text: "独立买家", style: "color:#888;font-size:0.85em" })]));
+          statsRow.appendChild(el("div", {}, [el("div", { text: String(s.totalQuantity || 0), style: "font-size:1.4em;font-weight:bold" }), el("div", { text: "总兑换数量", style: "color:#888;font-size:0.85em" })]));
+          statsRow.appendChild(el("div", {}, [el("div", { text: `${statsJson.itemCount || 0}`, style: "font-size:1.4em;font-weight:bold" }), el("div", { text: "上架项目", style: "color:#888;font-size:0.85em" })]));
+          statsCard.appendChild(statsRow);
+          statsCard.appendChild(el("div", { text: `数据来源: ${s.source}`, style: "color:#aaa;font-size:0.8em;margin-top:8px" }));
+        } else {
+          statsCard.appendChild(el("div", { text: "统计数据暂不可用", style: "color:#999" }));
+        }
+      } catch {
+        statsCard.innerHTML = "";
+        statsCard.appendChild(el("div", { text: "统计服务不可达", style: "color:#aaa;font-size:0.9em" }));
+      }
+    })();
+  } else {
+    statsCard.innerHTML = "";
+    statsCard.appendChild(el("div", { text: "未配置 Worker API", style: "color:#aaa" }));
+  }
+
+  // Load items
+  try {
+    const { items } = await fetchItemList({ cursor: 1n, limit: 200 });
+    const filtered = items.filter((x) => String(x.item?.shopId) === String(shopId));
+
+    if (filtered.length === 0) {
+      itemsGrid.appendChild(el("div", { text: "暂无可兑换项目。", style: "color:#999" }));
+    } else {
+      for (const it of filtered) {
+        const item = it.item;
+        const card = el("div", {
+          class: "card",
+          style: "width:200px;display:flex;flex-direction:column;gap:6px"
+        });
+        card.appendChild(el("a", {
+          href: `#/item/${it.itemId}`,
+          text: `Item #${it.itemId}`,
+          style: "font-weight:bold"
+        }));
+        if (item?.tokenURI) {
+          card.appendChild(el("div", { text: shortText(String(item.tokenURI), 40), style: "font-size:0.8em;color:#888" }));
+        }
+        const priceStr = item?.unitPrice ? `${item.unitPrice} ${formatPayToken(item.payToken)}` : "";
+        if (priceStr) card.appendChild(el("div", { text: `价格: ${priceStr}`, style: "color:#2a7" }));
+        if (item?.maxSupply && BigInt(item.maxSupply) > 0n) {
+          card.appendChild(el("div", { text: `供应: ${item.maxSupply}`, style: "font-size:0.85em" }));
+        }
+        if (item?.paused) {
+          card.appendChild(el("div", { text: "⏸ 暂停", style: "color:#e90" }));
+        } else if (!item?.active) {
+          card.appendChild(el("div", { text: "下架", style: "color:#999" }));
+        } else {
+          card.appendChild(el("a", {
+            href: `#/item/${it.itemId}`,
+            text: "→ 查看兑换",
+            style: "color:#07c;font-size:0.9em"
+          }));
+        }
+        itemsGrid.appendChild(card);
+      }
+    }
+  } catch (e) {
+    itemsGrid.appendChild(el("div", { text: `项目加载失败: ${e.message}`, style: "color:red" }));
+  }
 }
 
 function parseBytesLen(hex) {

@@ -41,6 +41,11 @@ contract MyShopItems {
     mapping(uint256 => uint256) public itemSoldCount;
     mapping(uint256 => mapping(address => uint256)) public walletPurchaseCount;
 
+    // C11: dispute window — records purchase timestamp per purchaseId for DisputeModule (M4)
+    // purchaseId = keccak256(abi.encode(itemId, firstTokenId))
+    uint256 public disputeWindowSeconds = 7 days;
+    mapping(bytes32 => uint256) public purchaseTimestamps;
+
     struct Item {
         uint256 shopId;
         address payToken;
@@ -369,6 +374,19 @@ contract MyShopItems {
         return _items[itemId];
     }
 
+    // C11: dispute window config (owner can adjust; per-shop override comes in M4 DisputeModule)
+    function setDisputeWindowSeconds(uint256 seconds_) external onlyOwner {
+        disputeWindowSeconds = seconds_;
+    }
+
+    // C11: returns true if the purchase is still within the dispute window
+    // purchaseId = keccak256(abi.encode(itemId, firstTokenId))
+    function isInDisputeWindow(bytes32 purchaseId) external view returns (bool) {
+        uint256 ts = purchaseTimestamps[purchaseId];
+        if (ts == 0) return false;
+        return block.timestamp <= ts + disputeWindowSeconds;
+    }
+
     function getItemPage(uint256 itemId, uint256 version) external view returns (bytes32 contentHash, string memory uri) {
         if (version == 0 || version > itemPageCount[itemId]) revert InvalidVersion();
         ItemPage storage page = itemPages[itemId][version];
@@ -423,6 +441,10 @@ contract MyShopItems {
         }
 
         firstTokenId = _mintNft(item.nftContract, recipient, item.tokenURI, item.soulbound, quantity);
+
+        // C11: record purchase timestamp for dispute window (DisputeModule M4)
+        bytes32 purchaseId = keccak256(abi.encode(itemId, firstTokenId));
+        purchaseTimestamps[purchaseId] = block.timestamp;
 
         {
             PurchaseContext memory ctx = PurchaseContext({
