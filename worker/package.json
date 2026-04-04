@@ -11,6 +11,7 @@
     "regression": "pnpm check && pnpm test && pnpm -C ../frontend regression"
   },
   "dependencies": {
+    "better-sqlite3": "^12.8.0",
     "dotenv": "^16.4.5",
     "viem": "^2.23.2"
   },

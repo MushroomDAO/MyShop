@@ -1,12 +1,11 @@
 import http from "node:http";
-import fs from "node:fs/promises";
-import path from "node:path";
 import { URL } from "node:url";
 
 import { decodeEventLog, getAddress, http as httpTransport, parseAbiItem } from "viem";
 import { createPublicClient } from "viem";
 
 import { myShopItemsAbi, myShopsAbi } from "./abi.js";
+import { openDb, getDbPath } from "./db.js";
 
 const purchasedEvent = parseAbiItem(
   "event Purchased(uint256 indexed itemId,uint256 indexed shopId,address indexed buyer,address recipient,uint256 quantity,address payToken,uint256 payAmount,uint256 platformFeeAmount,bytes32 serialHash,uint256 firstTokenId)"
@@ -67,7 +66,6 @@ export async function startApiServer({ rpcUrl, chain, itemsAddress, port }) {
     replayedOnStart: false,
     persist: {
       enabled: process.env.INDEXER_PERSIST === "0" ? false : true,
-      path: process.env.INDEXER_PERSIST_PATH ?? null,
       lastSavedAtMs: null,
       saveInFlight: false,
       saveScheduled: false,
@@ -77,10 +75,7 @@ export async function startApiServer({ rpcUrl, chain, itemsAddress, port }) {
   };
 
   if (indexer.persist.enabled) {
-    indexer.persist.path =
-      indexer.persist.path ??
-      path.join(process.cwd(), "data", `indexer.${chain.id}.${items.toLowerCase()}.json`);
-    await _loadIndexerState({ indexer, chainId: chain.id, itemsAddress: items });
+    _loadIndexerState({ indexer, chainId: chain.id, itemsAddress: items });
   }
 
   if (indexer.enabled) {
@@ -125,7 +120,30 @@ export async function startApiServer({ rpcUrl, chain, itemsAddress, port }) {
       pathName = url.pathname;
 
       if (url.pathname === "/health") {
-        return _json(res, 200, { ok: true });
+        let dbStatus = "ok";
+        let totalPurchasesInDb = null;
+        try {
+          const db = openDb();
+          const row = db.prepare("SELECT COUNT(*) AS cnt FROM purchases WHERE chain_id = ?").get(chain.id);
+          totalPurchasesInDb = row ? Number(row.cnt) : 0;
+        } catch {
+          dbStatus = "error";
+        }
+        return _json(res, 200, {
+          ok: true,
+          timestamp: Math.floor(Date.now() / 1000),
+          services: {
+            apiServer: { status: "ok", port },
+            indexer: {
+              status: indexer.running ? "ok" : (indexer.enabled ? "stopped" : "disabled"),
+              enabled: indexer.enabled,
+              lastIndexedBlock: indexer.lastIndexedBlock?.toString() ?? null,
+              cachedPurchases: indexer.purchases.length,
+              totalPurchasesInDb
+            },
+            db: { status: dbStatus, path: getDbPath() }
+          }
+        });
       }
 
       if (url.pathname === "/config") {
@@ -189,7 +207,7 @@ export async function startApiServer({ rpcUrl, chain, itemsAddress, port }) {
           cachedPurchases: indexer.purchases.length,
           persist: {
             enabled: indexer.persist.enabled,
-            path: indexer.persist.path,
+            path: getDbPath(),
             lastSavedAtMs: indexer.persist.lastSavedAtMs,
             errors: indexer.persist.errors
           }
@@ -242,6 +260,7 @@ export async function startApiServer({ rpcUrl, chain, itemsAddress, port }) {
         lines.push(`myshop_indexer_persist_enabled ${indexer.persist.enabled ? 1 : 0}`);
         lines.push(`myshop_indexer_persist_errors ${indexer.persist.errors}`);
         if (indexer.persist.lastSavedAtMs != null) lines.push(`myshop_indexer_persist_last_saved_at_ms ${indexer.persist.lastSavedAtMs}`);
+        lines.push(`myshop_indexer_db_purchases ${indexer.purchases.length}`);
 
         const paths = Array.from(stats.pathCounts.keys()).sort();
         for (const p of paths) {
@@ -441,9 +460,6 @@ export async function startApiServer({ rpcUrl, chain, itemsAddress, port }) {
     close: () =>
       new Promise((resolve, reject) => {
         indexer.stop = true;
-        if (indexer.persist.enabled) {
-          void _persistIndexerState({ indexer, chainId: chain.id, itemsAddress: items });
-        }
         server.close((err) => (err ? reject(err) : resolve()));
       }),
     port
@@ -753,82 +769,109 @@ function _topByValue(map, field, limit) {
   return list.slice(0, limit);
 }
 
-async function _loadIndexerState({ indexer, chainId, itemsAddress }) {
-  const filePath = indexer.persist.path;
-  if (!filePath) return;
-
-  let raw;
+function _insertPurchase({ p, chainId }) {
   try {
-    raw = await fs.readFile(filePath, "utf8");
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes("ENOENT")) return;
-    indexer.persist.errors += 1;
-    return;
-  }
-
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
+    const db = openDb();
+    db.prepare(
+      `INSERT OR IGNORE INTO purchases
+         (shop_id, item_id, buyer, recipient, token_id, serial_hash, quantity,
+          tx_hash, log_index, block_number, timestamp, chain_id, pay_token, pay_amount, platform_fee_amount)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      p.shopId ?? "",
+      p.itemId ?? "",
+      p.buyer ?? "",
+      p.recipient ?? "",
+      p.firstTokenId ?? null,
+      p.serialHash ?? null,
+      p.quantity ?? "1",
+      p.txHash ?? "",
+      p.logIndex ?? 0,
+      p.blockNumber ?? 0,
+      0,
+      Number(chainId),
+      p.payToken ?? null,
+      p.payAmount ?? null,
+      p.platformFeeAmount ?? null
+    );
   } catch {
-    indexer.persist.errors += 1;
-    return;
+    // non-fatal: in-memory array is still the source of truth for queries
   }
+}
 
-  if (parsed?.version !== 1) return;
-  if (Number(parsed?.chainId) !== Number(chainId)) return;
-  if (typeof parsed?.itemsAddress !== "string") return;
-  if (getAddress(parsed.itemsAddress) !== getAddress(itemsAddress)) return;
+function _loadIndexerState({ indexer, chainId, itemsAddress }) {
+  try {
+    const db = openDb();
 
-  const lastIndexedBlock = parsed?.lastIndexedBlock != null ? BigInt(parsed.lastIndexedBlock) : null;
-  const purchases = Array.isArray(parsed?.purchases) ? parsed.purchases : null;
-  if (!purchases) return;
+    // Load last indexed block from indexer_state table
+    const stateRow = db.prepare("SELECT last_block FROM indexer_state WHERE chain_id = ?").get(Number(chainId));
+    if (stateRow && stateRow.last_block > 0) {
+      indexer.lastIndexedBlock = BigInt(stateRow.last_block);
+    }
 
-  indexer.purchases = purchases.slice(-indexer.maxRecords);
-  indexer.purchaseKeys = new Set(indexer.purchases.map((p) => `${p.txHash}:${p.logIndex}`));
-  if (lastIndexedBlock != null) {
-    indexer.lastIndexedBlock = lastIndexedBlock;
+    // Load recent purchases into memory (up to maxRecords)
+    const rows = db
+      .prepare(
+        `SELECT tx_hash, log_index, block_number, item_id, shop_id, buyer, recipient,
+                quantity, pay_token, pay_amount, platform_fee_amount, serial_hash,
+                token_id AS first_token_id, chain_id
+         FROM purchases
+         WHERE chain_id = ?
+         ORDER BY block_number ASC, log_index ASC
+         LIMIT ?`
+      )
+      .all(Number(chainId), indexer.maxRecords);
+
+    indexer.purchases = rows.map((r) => ({
+      chainId: r.chain_id,
+      txHash: r.tx_hash,
+      logIndex: r.log_index,
+      blockNumber: r.block_number,
+      itemId: r.item_id,
+      shopId: r.shop_id,
+      buyer: r.buyer,
+      recipient: r.recipient,
+      quantity: r.quantity,
+      payToken: r.pay_token,
+      payAmount: r.pay_amount,
+      platformFeeAmount: r.platform_fee_amount,
+      serialHash: r.serial_hash,
+      firstTokenId: r.first_token_id
+    }));
+    indexer.purchaseKeys = new Set(indexer.purchases.map((p) => `${p.txHash}:${p.logIndex}`));
+  } catch (e) {
+    indexer.persist.errors += 1;
   }
 }
 
 function _schedulePersistIndexerState({ indexer, chainId, itemsAddress }) {
   if (!indexer.persist.enabled) return;
-  if (indexer.persist.saveInFlight) return;
   if (indexer.persist.saveScheduled) return;
 
   indexer.persist.saveScheduled = true;
   indexer.persist.saveTimer = setTimeout(() => {
     indexer.persist.saveScheduled = false;
-    void _persistIndexerState({ indexer, chainId, itemsAddress });
+    _persistIndexerState({ indexer, chainId, itemsAddress });
   }, 200);
 }
 
-async function _persistIndexerState({ indexer, chainId, itemsAddress }) {
+function _persistIndexerState({ indexer, chainId, itemsAddress }) {
   if (!indexer.persist.enabled) return;
-  if (indexer.persist.saveInFlight) return;
 
-  const filePath = indexer.persist.path;
-  if (!filePath) return;
-
-  indexer.persist.saveInFlight = true;
   try {
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    const db = openDb();
+    const nowSec = Math.floor(Date.now() / 1000);
+    const lastBlock = indexer.lastIndexedBlock != null ? Number(indexer.lastIndexedBlock) : 0;
 
-    const tmpPath = `${filePath}.tmp`;
-    const payload = {
-      version: 1,
-      chainId: Number(chainId),
-      itemsAddress,
-      lastIndexedBlock: indexer.lastIndexedBlock?.toString() ?? null,
-      purchases: indexer.purchases
-    };
-    await fs.writeFile(tmpPath, JSON.stringify(payload), "utf8");
-    await fs.rename(tmpPath, filePath);
+    db.prepare(
+      `INSERT INTO indexer_state (chain_id, last_block, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(chain_id) DO UPDATE SET last_block = excluded.last_block, updated_at = excluded.updated_at`
+    ).run(Number(chainId), lastBlock, nowSec);
+
     indexer.persist.lastSavedAtMs = Date.now();
   } catch {
     indexer.persist.errors += 1;
-  } finally {
-    indexer.persist.saveInFlight = false;
   }
 }
 
@@ -968,6 +1011,10 @@ async function _startIndexer({ client, chainId, itemsAddress, cache, indexer }) 
 
         const p = _decodePurchasedLog({ chainId, log });
         indexer.purchases.push(p);
+
+        if (indexer.persist.enabled) {
+          _insertPurchase({ p, chainId });
+        }
 
         if (indexer.purchases.length > indexer.maxRecords) {
           const removed = indexer.purchases.splice(0, indexer.purchases.length - indexer.maxRecords);

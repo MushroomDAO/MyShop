@@ -1,5 +1,6 @@
 import http from "node:http";
 import { URL } from "node:url";
+import { openDb, getDbPath } from "./db.js";
 
 import { encodeAbiParameters, getAddress, http as httpTransport, keccak256, parseAbiParameters, toBytes } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -104,7 +105,24 @@ export async function startPermitServer({
 
       if (url.pathname === "/health") {
         stats.okTotal += 1;
-        _json(res, 200, { ok: true });
+        let dbStatus = "ok";
+        try {
+          openDb();
+        } catch {
+          dbStatus = "error";
+        }
+        _json(res, 200, {
+          ok: true,
+          timestamp: Math.floor(Date.now() / 1000),
+          services: {
+            permitServer: { status: "ok", port },
+            signers: {
+              serialSigner: { configured: walletClients.serial != null },
+              riskSigner: { configured: walletClients.risk != null }
+            },
+            db: { status: dbStatus, path: getDbPath() }
+          }
+        });
         return;
       }
 
@@ -269,6 +287,24 @@ export async function startPermitServer({
         });
         const serialHash = serialResult.serialHash;
 
+        // Check if nonce already issued by this server for this (itemId, buyer)
+        try {
+          const db = openDb();
+          const existing = db
+            .prepare("SELECT 1 FROM issued_nonces WHERE item_id = ? AND buyer = ? AND nonce = ?")
+            .get(itemId.toString(), buyer.toLowerCase(), nonce.toString());
+          if (existing) {
+            throw new HttpError({
+              status: 409,
+              code: "nonce_already_issued",
+              message: "This nonce has already been issued for this buyer and item"
+            });
+          }
+        } catch (e) {
+          if (e instanceof HttpError) throw e;
+          // DB error is non-fatal for nonce check — log and continue
+        }
+
         const signature = await walletClients.serial.signTypedData({
           domain: { name: "MyShop", version: "1", chainId: domainChainId, verifyingContract: getAddress(itemsAddress) },
           types: {
@@ -283,6 +319,16 @@ export async function startPermitServer({
           primaryType: "SerialPermit",
           message: { itemId, buyer, serialHash, deadline, nonce }
         });
+
+        // Persist the issued nonce
+        try {
+          const db = openDb();
+          db.prepare(
+            "INSERT OR IGNORE INTO issued_nonces (item_id, buyer, nonce, issued_at) VALUES (?, ?, ?, ?)"
+          ).run(itemId.toString(), buyer.toLowerCase(), nonce.toString(), Math.floor(Date.now() / 1000));
+        } catch {
+          // non-fatal: nonce is still recorded on-chain after buyer uses it
+        }
 
         const extraData = encodeAbiParameters(
           parseAbiParameters("bytes32 serialHash,uint256 deadline,uint256 nonce,bytes sig"),
