@@ -530,6 +530,40 @@ function formatError(e) {
   return msg;
 }
 
+// F4: Revert reason translation
+const REVERT_MESSAGES = {
+  ExceedsMaxSupply: "This item is sold out.",
+  ExceedsPerWallet: "You've reached the per-wallet limit for this item.",
+  NotYetAvailable: "This item is not available yet.",
+  SaleEnded: "The sale period for this item has ended.",
+  ItemPaused: "This item is temporarily unavailable.",
+  ShopPaused: "This exchange counter is temporarily closed.",
+  InvalidSerialPermit: "Serial verification failed. Please try again.",
+  NonceAlreadyUsed: "This purchase session has expired. Please start over.",
+  InsufficientBalance: "Insufficient token balance.",
+  MaxItemsReached: "This item is sold out.",
+  ItemInactive: "This item is not currently available.",
+  ActionNotAllowed: "This item action is not allowed.",
+  ShopNotFound: "Shop not found.",
+  ItemNotFound: "Item not found.",
+  InvalidPayment: "Invalid payment amount or token.",
+  TransferFailed: "Token transfer failed. Check your balance and allowance."
+};
+
+function translateRevertReason(error) {
+  const msg = (error && typeof error === "object")
+    ? (error.message || error.reason || String(error))
+    : String(error);
+  for (const [key, human] of Object.entries(REVERT_MESSAGES)) {
+    if (msg.includes(key)) return human;
+  }
+  if (msg.toLowerCase().includes("user rejected")) return "Transaction cancelled.";
+  if (msg.toLowerCase().includes("insufficient allowance")) return "Insufficient token allowance. Please approve first.";
+  if (msg.toLowerCase().includes("insufficient balance") || msg.toLowerCase().includes("exceeds balance"))
+    return "Insufficient token balance.";
+  return "Transaction failed. Please try again.";
+}
+
 function showTxError(e) {
   const base = formatError(e);
   const parts = [base];
@@ -2639,19 +2673,321 @@ function renderPurchasesList(container, { purchases, emptyText }) {
   }
 }
 
+// F1: IPFS multi-gateway fetch
+const IPFS_GATEWAYS = [
+  "https://cloudflare-ipfs.com/ipfs/",
+  "https://ipfs.io/ipfs/",
+  "https://gateway.pinata.cloud/ipfs/"
+];
+
+async function fetchIpfs(cid) {
+  for (const gw of IPFS_GATEWAYS) {
+    try {
+      const res = await fetch(gw + cid, { signal: AbortSignal.timeout(5000) });
+      if (res.ok) return res.json();
+    } catch {
+      // try next gateway
+    }
+  }
+  return null;
+}
+
+async function fetchIpfsMetadata(tokenURI) {
+  if (!tokenURI) return null;
+  if (tokenURI.startsWith("ipfs://")) {
+    const cid = tokenURI.slice(7);
+    return fetchIpfs(cid);
+  }
+  // Fallback: use existing gateway-aware fetch
+  return fetchMetadataFromTokenUri(tokenURI);
+}
+
+// F3: Purchase state machine
+// States: idle -> checking -> awaiting_permit -> awaiting_approval -> pending -> confirming -> success | error
+let purchaseState = { state: "idle", txHash: null, tokenId: null, error: null, blockNumber: null };
+
+function setPurchaseState(next) {
+  purchaseState = { ...purchaseState, ...next };
+  renderPurchaseStateBars();
+}
+
+function renderPurchaseStateBars() {
+  const bars = document.querySelectorAll(".purchase-state-bar");
+  if (!bars.length) return;
+  const { state, txHash, tokenId, error, blockNumber } = purchaseState;
+  let text = "";
+  let color = "#64748b";
+  if (state === "idle") { text = ""; color = "#64748b"; }
+  else if (state === "checking") { text = "Checking eligibility..."; color = "#2563eb"; }
+  else if (state === "awaiting_permit") { text = "Getting serial permit..."; color = "#7c3aed"; }
+  else if (state === "awaiting_approval") { text = "Approve token spending in wallet..."; color = "#d97706"; }
+  else if (state === "pending") {
+    const explorerBase = explorerBaseUrl(chain?.id);
+    text = `Transaction submitted...`;
+    color = "#0891b2";
+    for (const bar of bars) {
+      bar.innerHTML = "";
+      bar.style.color = color;
+      bar.appendChild(document.createTextNode("Transaction submitted... "));
+      if (txHash && explorerBase) {
+        bar.appendChild(el("a", { href: `${explorerBase}/tx/${txHash}`, target: "_blank", rel: "noreferrer", text: shortHex(txHash) }));
+      } else if (txHash) {
+        bar.appendChild(el("span", { text: shortHex(txHash) }));
+      }
+    }
+    return;
+  }
+  else if (state === "confirming") {
+    text = `Waiting for confirmation...${blockNumber ? ` (block ${blockNumber})` : ""}`;
+    color = "#0891b2";
+  }
+  else if (state === "success") {
+    const explorerBase = explorerBaseUrl(chain?.id);
+    for (const bar of bars) {
+      bar.innerHTML = "";
+      bar.style.color = "#16a34a";
+      bar.appendChild(el("span", { text: `Redeemed!${tokenId != null ? ` NFT #${tokenId} received` : ""} ` }));
+      bar.appendChild(el("a", { href: "#/my", text: "View My NFTs" }));
+    }
+    return;
+  }
+  else if (state === "error") {
+    for (const bar of bars) {
+      bar.innerHTML = "";
+      bar.style.color = "#dc2626";
+      bar.appendChild(el("span", { text: translateRevertReason({ message: error || "" }) }));
+    }
+    return;
+  }
+  for (const bar of bars) {
+    bar.textContent = text;
+    bar.style.color = color;
+  }
+}
+
+async function buyWithStateMachine({ itemId, quantity, recipient, extraData, ethValue }) {
+  if (!walletClient || !connectedAddress) throw new Error("connect wallet first");
+  const itemsAddress = requireAddress(getCurrentCfgValue("itemsAddress"), "itemsAddress");
+
+  setPurchaseState({ state: "checking", txHash: null, tokenId: null, error: null });
+
+  try {
+    setPurchaseState({ state: "awaiting_approval" });
+    await runWriteTx({
+      label: `buy itemId=${itemId.toString()} qty=${quantity.toString()}`,
+      buttonIds: ["btnItemDetailRedeem"],
+      onStatus: (status, meta) => {
+        if (status === "waiting_wallet") setPurchaseState({ state: "awaiting_approval" });
+        else if (status === "pending") setPurchaseState({ state: "pending", txHash: meta.hash || null });
+        else if (status === "success") setPurchaseState({ state: "confirming" });
+        else if (status === "error") setPurchaseState({ state: "error", error: meta.error || "unknown error" });
+      },
+      write: () =>
+        walletClient.writeContract({
+          address: itemsAddress,
+          abi: myShopItemsAbi,
+          functionName: "buy",
+          args: [itemId, quantity, recipient, extraData],
+          account: connectedAddress,
+          value: ethValue ? parseEther(ethValue) : undefined
+        })
+    });
+
+    // Try to read firstTokenId from logs
+    let tokenId = null;
+    try {
+      if (lastTx?.hash) {
+        const receipt = await publicClient.getTransactionReceipt({ hash: lastTx.hash });
+        for (const log of receipt.logs || []) {
+          try {
+            const decoded = decodeEventLog({ abi: myShopItemsAbi, data: log.data, topics: log.topics });
+            if (decoded?.eventName === "Purchased" && decoded.args?.firstTokenId != null) {
+              tokenId = decoded.args.firstTokenId.toString();
+              break;
+            }
+          } catch {
+            // skip
+          }
+        }
+      }
+    } catch {
+      // non-fatal
+    }
+    setPurchaseState({ state: "success", tokenId });
+  } catch (e) {
+    const errMsg = getErrorText(e);
+    setPurchaseState({ state: "error", error: errMsg });
+    throw e;
+  }
+}
+
+// F2: My History Page (#/my)
+async function renderMyHistoryPage(container) {
+  container.appendChild(el("h2", { text: "My Redemptions (#/my)" }));
+
+  if (!connectedAddress) {
+    container.appendChild(el("div", { text: "Please connect your wallet to view your redemptions." }));
+    container.appendChild(
+      el("button", {
+        text: "Connect Wallet",
+        onclick: () => connect().catch(showTxError)
+      })
+    );
+    return;
+  }
+
+  const addrShort = shortHex(connectedAddress);
+  container.appendChild(kv("Wallet", el("span", { text: addrShort })));
+
+  const loadingMsg = el("div", { text: "Loading redemptions..." });
+  container.appendChild(loadingMsg);
+
+  const listBox = el("div", { id: "myHistoryList" });
+  container.appendChild(listBox);
+
+  let purchases = [];
+  try {
+    const res = await fetchPurchases({ buyer: connectedAddress, limit: 100 });
+    purchases = res.purchases || [];
+  } catch (e) {
+    loadingMsg.textContent = `Failed to load: ${getErrorText(e)}`;
+    return;
+  }
+
+  loadingMsg.remove();
+
+  if (purchases.length === 0) {
+    listBox.appendChild(el("div", { text: "No redemptions yet." }));
+    return;
+  }
+
+  listBox.appendChild(el("div", { text: `${purchases.length} redemption(s) found.` }));
+
+  // Fetch IPFS metadata names in background; use a cache
+  const metaCache = new Map();
+
+  for (const p of purchases) {
+    const row = el("div", { style: "border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; margin: 6px 0;" });
+
+    const item = p.item || null;
+    const shopName = `Shop #${p.shopId}`;
+    const itemNameEl = el("span", { text: `Item #${p.itemId}` });
+    const explorerBase = explorerBaseUrl(chain?.id);
+    const txLink = explorerBase && p.txHash
+      ? el("a", { href: `${explorerBase}/tx/${p.txHash}`, target: "_blank", rel: "noreferrer", text: shortHex(p.txHash) })
+      : el("span", { text: shortHex(p.txHash || "") });
+
+    const dateText = p.blockNumber ? `block ${p.blockNumber}` : "";
+    const tokenIdText = p.firstTokenId != null ? `Token #${p.firstTokenId}` : "";
+
+    row.appendChild(
+      el("div", {}, [
+        el("strong", {}, [itemNameEl]),
+        el("span", { text: ` — ${shopName}` }),
+        tokenIdText ? el("span", { text: ` — ${tokenIdText}` }) : null,
+        el("span", { text: " — tx: " }),
+        txLink,
+        dateText ? el("span", { text: ` — ${dateText}` }) : null
+      ])
+    );
+    listBox.appendChild(row);
+
+    // Async populate item name from IPFS metadata
+    if (item && item.tokenURI) {
+      const uri = item.tokenURI;
+      (async () => {
+        try {
+          let meta = metaCache.get(uri);
+          if (!meta) {
+            meta = await fetchIpfsMetadata(uri);
+            if (meta) metaCache.set(uri, meta);
+          }
+          if (meta && meta.name) {
+            itemNameEl.textContent = `${meta.name} (Item #${p.itemId})`;
+          }
+        } catch {
+          // non-fatal
+        }
+      })();
+    }
+  }
+}
+
 async function renderItemDetail(container, itemId) {
+  // Reset purchase state machine for this page
+  setPurchaseState({ state: "idle", txHash: null, tokenId: null, error: null });
+
   container.appendChild(el("h2", { text: `Item #${itemId}` }));
+
+  // F1: IPFS metadata (show loading placeholder, fill in async)
+  const metaNameEl = el("div", { text: "Loading..." });
+  const metaDescEl = el("div", { text: "" });
+  const metaImgEl = el("div");
+  container.appendChild(
+    el("div", { style: "margin-bottom: 8px;" }, [metaNameEl, metaDescEl, metaImgEl])
+  );
+
   const out = el("div", { id: "itemDetailOut" });
-  const metaBox = el("div", { id: "itemDetailMeta" });
   container.appendChild(out);
-  container.appendChild(metaBox);
 
   const item = await fetchItem(itemId);
+
+  // F1: Paused / active status badge
+  let shopPaused = false;
+  try {
+    const shop = await fetchShop(item.shopId);
+    shopPaused = !!shop.paused;
+  } catch {
+    // non-fatal
+  }
+  const isPaused = shopPaused || !item.active;
+  if (isPaused) {
+    container.appendChild(
+      el("div", {
+        style: "display:inline-block;padding:3px 10px;border-radius:999px;background:#fef2f2;color:#dc2626;font-weight:600;margin-bottom:6px;",
+        text: shopPaused ? "Shop Paused" : "Item Paused"
+      })
+    );
+  }
+
   out.appendChild(kv("source", String(item.__source || "")));
   out.appendChild(kv("shopId", el("a", { href: `#/shop/${item.shopId}`, text: `Shop #${item.shopId}` })));
   out.appendChild(kv("active", String(item.active)));
+
+  // F1: Price
+  const tokenSymbol = formatPayToken(item.payToken);
+  out.appendChild(kv("price", `${item.unitPrice} ${tokenSymbol}`));
   out.appendChild(kv("payToken", formatPayToken(item.payToken)));
   out.appendChild(kv("unitPrice", String(item.unitPrice)));
+
+  // F1: Stock status — maxSupply / perWallet from worker item data if available
+  const maxSupply = item.maxSupply != null ? Number(item.maxSupply) : (item.maxItems != null ? Number(item.maxItems) : null);
+  const soldCount = item.soldCount != null ? Number(item.soldCount) : null;
+  const perWallet = item.perWallet != null ? Number(item.perWallet) : null;
+  const startTime = item.startTime != null ? Number(item.startTime) : null;
+  const endTime = item.endTime != null ? Number(item.endTime) : null;
+
+  if (maxSupply !== null) {
+    const stockText = maxSupply === 0
+      ? "Unlimited"
+      : soldCount !== null
+        ? `${maxSupply - soldCount} / ${maxSupply} remaining`
+        : `Max: ${maxSupply}`;
+    out.appendChild(kv("stock", stockText));
+  }
+
+  if (perWallet !== null && perWallet > 0) {
+    out.appendChild(kv("perWalletLimit", `Limit: ${perWallet} per wallet`));
+  }
+
+  // F1: Time window
+  if (startTime) {
+    out.appendChild(kv("startTime", new Date(startTime * 1000).toLocaleString()));
+  }
+  if (endTime) {
+    out.appendChild(kv("endTime", new Date(endTime * 1000).toLocaleString()));
+  }
+
   out.appendChild(kv("requiresSerial", String(item.requiresSerial)));
   out.appendChild(kv("soulbound", String(item.soulbound)));
   out.appendChild(kv("nftContract", addressNode(item.nftContract)));
@@ -2659,7 +2995,7 @@ async function renderItemDetail(container, itemId) {
   out.appendChild(kv("actionDataBytes", String(parseBytesLen(item.actionData) ?? "")));
   out.appendChild(kv("actionData", item.actionData ? shortText(String(item.actionData), 80) : ""));
   const tokenUriHttp = toHttpUri(item.tokenURI);
-  out.appendChild(kv("tokenURI", tokenUriHttp ? el("a", { href: tokenUriHttp, target: "_blank", rel: "noreferrer", text: tokenUriHttp }) : item.tokenURI));
+  out.appendChild(kv("tokenURI", tokenUriHttp ? el("a", { href: tokenUriHttp, target: "_blank", rel: "noreferrer", text: tokenUriHttp }) : (item.tokenURI || "")));
 
   try {
     const itemsAddressVal = val("itemsAddress") || runtimeCfg.itemsAddress;
@@ -2690,16 +3026,103 @@ async function renderItemDetail(container, itemId) {
     out.appendChild(kv("defaultPageVersion", "unknown"));
   }
 
-  const meta = await fetchMetadataFromTokenUri(item.tokenURI);
-  if (meta) {
-    const name = String(meta.name || "");
-    const desc = String(meta.description || "");
-    metaBox.appendChild(el("div", { text: name ? `name: ${name}` : "" }));
-    metaBox.appendChild(el("div", { text: desc ? `description: ${desc}` : "" }));
-    const image = toHttpUri(meta.image || meta.image_url || "");
-    if (image) metaBox.appendChild(el("img", { src: image, style: "max-width: 320px; display: block; margin: 8px 0;" }));
+  // F1: IPFS metadata with multi-gateway fallback (async fill)
+  (async () => {
+    try {
+      const meta = await fetchIpfsMetadata(item.tokenURI);
+      if (meta) {
+        const name = String(meta.name || "");
+        const desc = String(meta.description || "");
+        metaNameEl.textContent = name || `Item #${itemId}`;
+        metaDescEl.textContent = desc;
+        const imgSrc = meta.image || meta.image_url || "";
+        const imgUrl = toHttpUri(imgSrc);
+        if (imgUrl) {
+          const img = el("img", { src: imgUrl, style: "max-width: 320px; display: block; margin: 8px 0;" });
+          img.onerror = () => { img.style.display = "none"; };
+          metaImgEl.appendChild(img);
+        }
+      } else {
+        metaNameEl.textContent = `Item #${itemId}`;
+      }
+    } catch {
+      metaNameEl.textContent = `Item #${itemId}`;
+    }
+  })();
+
+  // F1: Purchase eligibility check
+  const eligibilityBox = el("div", { style: "margin: 8px 0;" });
+  container.appendChild(eligibilityBox);
+  if (connectedAddress && perWallet != null && perWallet > 0) {
+    (async () => {
+      try {
+        const res = await fetchPurchases({ buyer: connectedAddress, itemId: String(itemId), limit: 500 });
+        const walletCount = (res.purchases || []).reduce((sum, p) => sum + Number(p.quantity || 1), 0);
+        if (walletCount >= perWallet) {
+          eligibilityBox.appendChild(
+            el("div", {
+              style: "display:inline-block;padding:3px 10px;border-radius:999px;background:#fef9c3;color:#92400e;font-weight:600;",
+              text: `Limit reached (${walletCount}/${perWallet})`
+            })
+          );
+        }
+      } catch {
+        // non-fatal
+      }
+    })();
   }
 
+  // F3: Purchase state machine status bar
+  const stateBar = el("div", { class: "purchase-state-bar", style: "min-height: 22px; margin: 8px 0; font-weight: 500;" });
+  container.appendChild(stateBar);
+
+  // F1: Redeem button (triggers F3 state machine)
+  const redeemSection = el("div", { style: "margin: 12px 0;" });
+  redeemSection.appendChild(el("h3", { text: "Redeem" }));
+  redeemSection.appendChild(el("div", { text: "qty: 1 | recipient: connected wallet" }));
+  if (item.requiresSerial) {
+    redeemSection.appendChild(el("div", { text: "Note: this item requires a serial permit. Use the Buyer page for serial-based purchase." }));
+  }
+  const redeemBtn = el("button", {
+    id: "btnItemDetailRedeem",
+    text: "Redeem",
+    style: "margin-top: 8px;",
+    onclick: () => {
+      if (!connectedAddress) {
+        connect().catch(showTxError);
+        return;
+      }
+      if (item.requiresSerial) {
+        routeState.buyerItemId = String(itemId);
+        window.location.hash = "#/buyer";
+        return;
+      }
+      setPurchaseState({ state: "idle" });
+      buyWithStateMachine({
+        itemId: BigInt(itemId),
+        quantity: 1n,
+        recipient: getAddress(connectedAddress),
+        extraData: "0x",
+        ethValue: ""
+      }).catch((e) => {
+        showTxError(e);
+      });
+    }
+  });
+  redeemSection.appendChild(redeemBtn);
+  redeemSection.appendChild(
+    el("button", {
+      text: "Advanced Buy (Buyer Page)",
+      style: "margin-left: 8px;",
+      onclick: () => {
+        routeState.buyerItemId = String(itemId);
+        window.location.hash = "#/buyer";
+      }
+    })
+  );
+  container.appendChild(redeemSection);
+
+  // F1: Recent purchases (last 5)
   container.appendChild(el("hr"));
   container.appendChild(el("h3", { text: "Recent Purchases" }));
   const purchasesOut = el("div", { id: "purchasesOut" });
@@ -2721,8 +3144,8 @@ async function renderItemDetail(container, itemId) {
   container.appendChild(purchasesOut);
 
   async function loadPurchases() {
-    const res = await fetchPurchases({ itemId: String(itemId), limit: 20 });
-    const header = el("div", { text: `source=${res.source || ""} count=${res.count || 0} fromBlock=${res.fromBlock || ""} toBlock=${res.toBlock || ""} indexedToBlock=${res.indexedToBlock || ""}` });
+    const res = await fetchPurchases({ itemId: String(itemId), limit: 5 });
+    const header = el("div", { text: `source=${res.source || ""} count=${res.count || 0}` });
     purchasesOut.innerHTML = "";
     purchasesOut.appendChild(header);
     const list = el("div", {});
@@ -2731,16 +3154,6 @@ async function renderItemDetail(container, itemId) {
   }
 
   await loadPurchases();
-
-  container.appendChild(
-    el("button", {
-      text: "Go Buy",
-      onclick: () => {
-        routeState.buyerItemId = String(itemId);
-        window.location.hash = "#/buyer";
-      }
-    })
-  );
 }
 
 async function renderPurchasesPage(container, query = {}) {
@@ -3847,6 +4260,7 @@ function render() {
       navLink("GToken 购买", "#/sale-gtoken"),
       navLink("风控评估", "#/risk"),
       navLink("买家", "#/buyer"),
+      navLink("My NFTs", "#/my"),
       navLink("购买记录", "#/purchases"),
       navLink("角色", "#/roles"),
       navLink("店主后台", "#/shop-console"),
@@ -3957,6 +4371,10 @@ function render() {
       if (route.parts[0] === "buyer") {
         if (route.query.itemId) routeState.buyerItemId = String(route.query.itemId);
         await renderBuyer(main);
+        return;
+      }
+      if (route.parts[0] === "my") {
+        await renderMyHistoryPage(main);
         return;
       }
       if (route.parts[0] === "roles") {
