@@ -356,44 +356,89 @@ export async function startApiServer({ rpcUrl, chain, itemsAddress, port }) {
         const includeEnrich = include.includes("enrich");
 
         const source = (url.searchParams.get("source") ?? "index").toLowerCase();
-        const useIndex = indexer.enabled && source !== "chain";
+        // "db" source: query SQLite directly (historical, full dataset, no block range limit)
+        const useDb = indexer.persist.enabled && source === "db";
+        const useIndex = !useDb && indexer.enabled && source !== "chain";
 
-        const purchases = useIndex
-          ? await _getPurchasesFromIndex({
-              client,
-              chainId: chain.id,
-              itemsAddress: items,
-              fromBlock,
-              toBlock,
-              buyer: args.buyer,
-              shopId: args.shopId,
-              itemId: args.itemId,
-              limit,
-              includeEnrich,
-              cache,
-              indexer
-            })
-          : await _getPurchasesFromChain({
-              client,
-              chainId: chain.id,
-              itemsAddress: items,
-              fromBlock,
-              toBlock,
-              args: Object.keys(args).length ? args : undefined,
-              limit,
-              includeEnrich,
-              cache
-            });
+        let purchases;
+        let resolvedSource;
+        if (useDb) {
+          purchases = await _getPurchasesFromDb({
+            client,
+            chainId: chain.id,
+            itemsAddress: items,
+            buyer: args.buyer,
+            shopId: args.shopId,
+            itemId: args.itemId,
+            limit,
+            includeEnrich,
+            cache
+          });
+          resolvedSource = "db";
+        } else if (useIndex) {
+          purchases = await _getPurchasesFromIndex({
+            client,
+            chainId: chain.id,
+            itemsAddress: items,
+            fromBlock,
+            toBlock,
+            buyer: args.buyer,
+            shopId: args.shopId,
+            itemId: args.itemId,
+            limit,
+            includeEnrich,
+            cache,
+            indexer
+          });
+          resolvedSource = "index";
+        } else {
+          purchases = await _getPurchasesFromChain({
+            client,
+            chainId: chain.id,
+            itemsAddress: items,
+            fromBlock,
+            toBlock,
+            args: Object.keys(args).length ? args : undefined,
+            limit,
+            includeEnrich,
+            cache
+          });
+          resolvedSource = "chain";
+        }
 
         return _json(res, 200, {
           ok: true,
-          source: useIndex ? "index" : "chain",
+          source: resolvedSource,
           fromBlock: fromBlock.toString(),
           toBlock: toBlock.toString(),
           latest: latest.toString(),
           indexedToBlock: indexer.lastIndexedBlock?.toString() ?? null,
           count: purchases.length,
           purchases
+        });
+      }
+
+      // W5: shop stats API — /shop-stats?shopId=1
+      if (url.pathname === "/shop-stats") {
+        const shopIdParam = url.searchParams.get("shopId");
+        if (!shopIdParam) {
+          return _json(res, 400, { ok: false, error: "shopId required" });
+        }
+        const shopId = BigInt(shopIdParam);
+        const shop = await _getShop(client, items, shopId, cache);
+        const itemCount = await _getShopItemCount(client, items, shopId, cache);
+
+        // Aggregate from SQLite if available, else from in-memory index
+        const stats = indexer.persist.enabled
+          ? _getShopStatsFromDb({ chainId: chain.id, shopId: shopIdParam })
+          : _getShopStatsFromIndex({ indexer, shopId: shopIdParam });
+
+        return _json(res, 200, {
+          ok: true,
+          shopId: shopId.toString(),
+          shop,
+          itemCount: itemCount.toString(),
+          stats
         });
       }
 
@@ -589,6 +634,21 @@ async function _getShopCount(client, shopsAddress, cache) {
   return cache.shopCount;
 }
 
+async function _getShopItemCount(client, itemsAddress, shopId, cache) {
+  const key = `shopItemCount:${shopId}`;
+  const now = Date.now();
+  if (cache[key] != null && now - (cache[key + "AtMs"] ?? 0) < 1500) return cache[key];
+  const count = await client.readContract({
+    address: itemsAddress,
+    abi: myShopItemsAbi,
+    functionName: "shopItemCount",
+    args: [shopId]
+  });
+  cache[key] = BigInt(count);
+  cache[key + "AtMs"] = now;
+  return cache[key];
+}
+
 async function _getPurchasesFromChain({ client, chainId, itemsAddress, fromBlock, toBlock, args, limit, includeEnrich, cache }) {
   const logs = await client.getLogs({
     address: itemsAddress,
@@ -659,6 +719,114 @@ async function _getPurchasesFromIndex({
   }
 
   return enriched;
+}
+
+// W4: query purchases directly from SQLite (full history, not limited to in-memory window)
+async function _getPurchasesFromDb({ client, chainId, itemsAddress, buyer, shopId, itemId, limit, includeEnrich, cache }) {
+  try {
+    const db = openDb();
+    let sql = `SELECT tx_hash, log_index, block_number, item_id, shop_id, buyer, recipient,
+                      quantity, pay_token, pay_amount, platform_fee_amount, serial_hash,
+                      token_id AS first_token_id, chain_id
+               FROM purchases WHERE chain_id = ?`;
+    const params = [Number(chainId)];
+
+    if (buyer) { sql += " AND LOWER(buyer) = ?"; params.push(buyer.toLowerCase()); }
+    if (shopId != null) { sql += " AND shop_id = ?"; params.push(shopId.toString()); }
+    if (itemId != null) { sql += " AND item_id = ?"; params.push(itemId.toString()); }
+    sql += " ORDER BY block_number DESC, log_index DESC LIMIT ?";
+    params.push(limit);
+
+    const rows = db.prepare(sql).all(...params);
+    const list = rows.map((r) => ({
+      chainId: r.chain_id,
+      txHash: r.tx_hash,
+      logIndex: r.log_index,
+      blockNumber: r.block_number,
+      itemId: r.item_id,
+      shopId: r.shop_id,
+      buyer: r.buyer,
+      recipient: r.recipient,
+      quantity: r.quantity,
+      payToken: r.pay_token,
+      payAmount: r.pay_amount,
+      platformFeeAmount: r.platform_fee_amount,
+      serialHash: r.serial_hash,
+      firstTokenId: r.first_token_id
+    }));
+
+    if (!includeEnrich) return list;
+    const enriched = [];
+    for (const p of list) {
+      const item = await _getItem(client, itemsAddress, BigInt(p.itemId), cache);
+      const shop = await _getShop(client, itemsAddress, BigInt(p.shopId), cache);
+      enriched.push({ ...p, item, shop });
+    }
+    return enriched;
+  } catch {
+    return [];
+  }
+}
+
+// W5: aggregate shop stats from SQLite
+function _getShopStatsFromDb({ chainId, shopId }) {
+  try {
+    const db = openDb();
+    const row = db.prepare(`
+      SELECT COUNT(*) AS total_purchases,
+             SUM(CAST(quantity AS INTEGER)) AS total_quantity,
+             SUM(CAST(pay_amount AS REAL)) AS total_revenue,
+             SUM(CAST(platform_fee_amount AS REAL)) AS total_platform_fees,
+             COUNT(DISTINCT buyer) AS unique_buyers,
+             MAX(block_number) AS last_block
+      FROM purchases WHERE chain_id = ? AND shop_id = ?
+    `).get(Number(chainId), shopId.toString());
+
+    return {
+      source: "db",
+      totalPurchases: row ? Number(row.total_purchases) : 0,
+      totalQuantity: row ? Number(row.total_quantity ?? 0) : 0,
+      totalRevenue: row ? String(Math.round(row.total_revenue ?? 0)) : "0",
+      totalPlatformFees: row ? String(Math.round(row.total_platform_fees ?? 0)) : "0",
+      uniqueBuyers: row ? Number(row.unique_buyers) : 0,
+      lastPurchaseBlock: row?.last_block ?? null
+    };
+  } catch {
+    return { source: "db", error: "db_unavailable" };
+  }
+}
+
+// W5: aggregate shop stats from in-memory indexer
+function _getShopStatsFromIndex({ indexer, shopId }) {
+  let totalPurchases = 0;
+  let totalQuantity = 0n;
+  let totalRevenue = 0n;
+  let totalPlatformFees = 0n;
+  const buyers = new Set();
+  let lastBlock = null;
+
+  for (const p of indexer.purchases) {
+    if (p.shopId !== shopId) continue;
+    totalPurchases++;
+    totalQuantity += _toBigInt(p.quantity);
+    totalRevenue += _toBigInt(p.payAmount);
+    totalPlatformFees += _toBigInt(p.platformFeeAmount);
+    if (p.buyer) buyers.add(p.buyer.toLowerCase());
+    if (p.blockNumber != null) {
+      const b = Number(p.blockNumber);
+      if (lastBlock == null || b > lastBlock) lastBlock = b;
+    }
+  }
+
+  return {
+    source: "index",
+    totalPurchases,
+    totalQuantity: totalQuantity.toString(),
+    totalRevenue: totalRevenue.toString(),
+    totalPlatformFees: totalPlatformFees.toString(),
+    uniqueBuyers: buyers.size,
+    lastPurchaseBlock: lastBlock
+  };
 }
 
 async function _buildRiskSummary({ client, list }) {

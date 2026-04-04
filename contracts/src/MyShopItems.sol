@@ -137,6 +137,9 @@ contract MyShopItems {
     event ItemDefaultPageVersionSet(uint256 indexed itemId, uint256 indexed version);
     // C3: item pause event
     event ItemPaused(uint256 indexed itemId, bool paused);
+    // C7/C8: withdrawal events
+    event ShopBalanceWithdrawn(uint256 indexed shopId, address indexed token, address indexed to, uint256 amount);
+    event ProtocolBalanceRescued(address indexed token, address indexed to, uint256 amount);
     event Purchased(
         uint256 indexed itemId,
         uint256 indexed shopId,
@@ -220,6 +223,41 @@ contract MyShopItems {
         }
         item.active = active;
         emit ItemStatusChanged(itemId, active);
+    }
+
+    // C7: shop treasury withdrawal — shop owner recovers accumulated ERC20 in this contract
+    // (ETH is pushed directly; ERC20 flows through this contract atomically but may accumulate
+    //  if a token reverts on forward — this provides a safe recovery path)
+    function withdrawShopBalance(uint256 shopId, address token, address to) external {
+        (address shopOwner,,,) = shops.shops(shopId);
+        if (shopOwner == address(0)) revert InvalidAddress();
+        if (msg.sender != owner && !shops.hasShopRole(shopId, msg.sender, ROLE_ITEM_MAINTAINER)) {
+            revert NotShopOwner();
+        }
+        if (to == address(0)) revert InvalidAddress();
+        uint256 bal = IERC20(token).balanceOf(address(this));
+        if (bal == 0) return;
+        bool ok = IERC20(token).transfer(to, bal);
+        if (!ok) revert TransferFailed();
+        emit ShopBalanceWithdrawn(shopId, token, to, bal);
+    }
+
+    // C8: protocol treasury withdrawal — owner rescues stuck ETH or ERC20 from contract
+    function rescueETH(address to) external onlyOwner {
+        if (to == address(0)) revert InvalidAddress();
+        uint256 bal = address(this).balance;
+        if (bal == 0) return;
+        _sendEth(to, bal);
+        emit ProtocolBalanceRescued(address(0), to, bal);
+    }
+
+    function rescueERC20(address token, address to) external onlyOwner {
+        if (token == address(0) || to == address(0)) revert InvalidAddress();
+        uint256 bal = IERC20(token).balanceOf(address(this));
+        if (bal == 0) return;
+        bool ok = IERC20(token).transfer(to, bal);
+        if (!ok) revert TransferFailed();
+        emit ProtocolBalanceRescued(token, to, bal);
     }
 
     // C3: pause/unpause individual item
