@@ -49,6 +49,9 @@ const serialIssuerUrl = optionalEnv("SERIAL_ISSUER_URL", "");
 const port = Number(optionalEnv("PORT", "8787"));
 const enableApi = optionalEnv("ENABLE_API", "0") === "1";
 const apiPort = Number(optionalEnv("API_PORT", "8788"));
+// W17: gasless relay config (optional — 503 returned when not set)
+const bundlerUrl = optionalEnv("BUNDLER_URL", "");
+const paymasterUrl = optionalEnv("PAYMASTER_URL", "");
 
 if (mode === "watch" || mode === "both") {
   watchPurchased({
@@ -79,7 +82,9 @@ if (mode === "permit" || mode === "both") {
     serialSignerPrivateKey: serialSignerPrivateKey ? normalizePrivateKey(serialSignerPrivateKey) : null,
     riskSignerPrivateKey: riskSignerPrivateKey ? normalizePrivateKey(riskSignerPrivateKey) : null,
     serialIssuerUrl: serialIssuerUrl || null,
-    port
+    port,
+    bundlerUrl: bundlerUrl || null,
+    paymasterUrl: paymasterUrl || null
   })
     .then(({ port: actualPort }) => {
       log.info("permit server started", { port: actualPort });

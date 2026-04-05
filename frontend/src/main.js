@@ -7,7 +7,9 @@ import {
   getDefaultShopRoleConfig,
   erc20Abi,
   myShopItemsAbi,
-  myShopsAbi
+  myShopsAbi,
+  x402AccessActionAbi,
+  subscriptionActionAbi
 } from "./contracts.js";
 
 // F7: mobile-responsive base styles
@@ -82,7 +84,15 @@ function getRuntimeConfig() {
     workerApiUrl: stored.workerApiUrl || envCfg.workerApiUrl || "",
     apntsSaleUrl: stored.apntsSaleUrl || envCfg.apntsSaleUrl || "",
     gtokenSaleUrl: stored.gtokenSaleUrl || envCfg.gtokenSaleUrl || "",
-    ipfsGateway: stored.ipfsGateway || envCfg.ipfsGateway || ""
+    ipfsGateway: stored.ipfsGateway || envCfg.ipfsGateway || "",
+    disputeEscrowAddress: stored.disputeEscrowAddress || envCfg.disputeEscrowAddress || "",
+    disputeWindowSeconds: stored.disputeWindowSeconds || envCfg.disputeWindowSeconds || 604800,
+    x402ActionAddress: stored.x402ActionAddress || envCfg.x402ActionAddress || "",
+    subscriptionActionAddress: stored.subscriptionActionAddress || envCfg.subscriptionActionAddress || "",
+    // M7: AirAccount passkey + gasless config
+    enableGasless: stored.enableGasless != null ? stored.enableGasless : Boolean(envCfg.enableGasless),
+    airaccountFactory: stored.airaccountFactory || envCfg.airaccountFactory || "0xa0007c5db27548d8c1582773856db1d123107383",
+    bundlerUrl: stored.bundlerUrl || envCfg.bundlerUrl || ""
   };
 }
 
@@ -98,6 +108,9 @@ let connectedAddress = null;
 let connectedChainId = null;
 let walletEventsBound = false;
 let activeTxLabel = null;
+// M7: AA wallet state — separate from the signing EOA
+let aaWalletAddress = null; // AA smart wallet address (from passkey flow)
+let _aaaClientCache = null; // cached YAAAClient instance
 let lastTx = {
   label: null,
   hash: null,
@@ -406,6 +419,37 @@ function formatItemSummary(item, { includeShopId } = {}) {
   const shopPart = includeShopId ? ` shopId=${item.shopId}` : "";
   const tokenUriPart = tokenUriLabel ? ` tokenURI=${tokenUriLabel}` : "";
   return ` src=${item.__source || ""}${shopPart} active=${item.active} payToken=${formatPayToken(item.payToken)} unitPrice=${item.unitPrice} requiresSerial=${item.requiresSerial} soulbound=${item.soulbound} action=${actionLabel} nft=${nftLabel}${tokenUriPart}`;
+}
+
+// F19: Returns true if item's action matches the configured X402AccessAction address.
+function isX402Item(item) {
+  const x402Addr = runtimeCfg.x402ActionAddress;
+  if (!x402Addr || !item?.action) return false;
+  try {
+    return getAddress(item.action) === getAddress(x402Addr);
+  } catch {
+    return false;
+  }
+}
+
+// F19: Attempt to decode resourceUri from actionData: abi.encode(address accessNft, string resourceUri).
+function decodeX402ResourceUri(actionData) {
+  if (!actionData || actionData === "0x" || actionData.length < 10) return null;
+  try {
+    const hex = String(actionData).replace(/^0x/, "");
+    if (hex.length < 128) return null;
+    const strOffset = parseInt(hex.slice(64, 128), 16);
+    const strHexOffset = strOffset * 2;
+    if (strHexOffset + 64 > hex.length) return null;
+    const strLen = parseInt(hex.slice(strHexOffset, strHexOffset + 64), 16);
+    if (strLen === 0) return null;
+    const strDataHex = hex.slice(strHexOffset + 64, strHexOffset + 64 + strLen * 2);
+    if (strDataHex.length < strLen * 2) return null;
+    const bytes = strDataHex.match(/.{1,2}/g).map((b) => parseInt(b, 16));
+    return new TextDecoder().decode(new Uint8Array(bytes));
+  } catch {
+    return null;
+  }
 }
 
 function sourceCountsLabel(list, getSource) {
@@ -2010,7 +2054,15 @@ function applyConfigFromInputs() {
     workerApiUrl: val("workerApiUrl") || "",
     ipfsGateway: val("ipfsGateway") || "",
     apntsSaleUrl: val("apntsSaleUrl") || "",
-    gtokenSaleUrl: val("gtokenSaleUrl") || ""
+    gtokenSaleUrl: val("gtokenSaleUrl") || "",
+    disputeEscrowAddress: val("disputeEscrowAddress") || "",
+    disputeWindowSeconds: val("disputeWindowSeconds") ? Number(val("disputeWindowSeconds")) : 604800,
+    x402ActionAddress: val("x402ActionAddress") || "",
+    subscriptionActionAddress: val("subscriptionActionAddress") || "",
+    // M7: AirAccount passkey + gasless config
+    enableGasless: document.getElementById("enableGasless") ? document.getElementById("enableGasless").checked : Boolean(runtimeCfg.enableGasless),
+    airaccountFactory: val("airaccountFactory") || "0xa0007c5db27548d8c1582773856db1d123107383",
+    bundlerUrl: val("bundlerUrl") || ""
   };
   runtimeCfg = next;
   saveStoredConfig(next);
@@ -2191,9 +2243,28 @@ async function renderPlaza(container) {
       const nftLabel = item.nftContract && !isZeroAddress(item.nftContract) ? shortHex(item.nftContract) : "none";
       const actionBytes = parseBytesLen(item.actionData);
       const tokenUriLabel = item.tokenURI ? shortText(item.tokenURI, 36) : "";
+      // F20: subscription badge — shown when item action matches SUBSCRIPTION_ACTION_ADDRESS
+      const subActionAddr = runtimeCfg.subscriptionActionAddress;
+      const isSubscription = subActionAddr && item.action && isAddress(subActionAddr) &&
+        item.action.toLowerCase() === subActionAddr.toLowerCase();
+      const subBadge = isSubscription
+        ? el("span", {
+            style: "background:#2563eb;color:#fff;border-radius:4px;padding:2px 7px;font-size:0.85em;margin-left:5px;",
+            text: "Subscription"
+          })
+        : null;
+      // F19: x402 "API Access" badge
+      const x402Badge = isX402Item(item)
+        ? el("span", {
+            style: "background:#7c3aed;color:#fff;border-radius:4px;padding:2px 7px;font-size:0.85em;margin-left:5px;",
+            text: "API Access"
+          })
+        : null;
       itemsEl.appendChild(
         el("div", {}, [
           el("a", { href: `#/item/${it.itemId}`, text: `Item #${it.itemId}` }),
+          subBadge,
+          x402Badge,
           el("span", {
             text: formatItemSummary(item, { includeShopId: true })
           }),
@@ -2663,6 +2734,13 @@ async function renderShopDetail(container, shopId) {
           text: `Item #${it.itemId}`,
           style: "font-weight:bold"
         }));
+        // F19: x402 "API Access" badge on shop item card
+        if (isX402Item(item)) {
+          card.appendChild(el("span", {
+            text: "API Access",
+            style: "display:inline-block;padding:1px 7px;border-radius:4px;background:#7c3aed;color:#fff;font-size:0.8em;"
+          }));
+        }
         if (item?.tokenURI) {
           card.appendChild(el("div", { text: shortText(String(item.tokenURI), 40), style: "font-size:0.8em;color:#888" }));
         }
@@ -2694,6 +2772,19 @@ function parseBytesLen(hex) {
   const s = String(hex || "");
   if (!s.startsWith("0x")) return null;
   return Math.max(0, Math.floor((s.length - 2) / 2));
+}
+
+// F20: Format subscription duration in human-readable form
+function _formatSubscriptionDuration(seconds) {
+  if (!seconds || seconds <= 0) return "0 seconds (expired immediately)";
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  const parts = [];
+  if (days > 0) parts.push(`${days} day${days !== 1 ? "s" : ""}`);
+  if (hours > 0) parts.push(`${hours} hour${hours !== 1 ? "s" : ""}`);
+  if (mins > 0 && days === 0) parts.push(`${mins} min`);
+  return parts.length ? parts.join(" ") : `${seconds}s`;
 }
 
 function buildPurchaseProof(p) {
@@ -2823,7 +2914,7 @@ async function fetchIpfsMetadata(tokenURI) {
 
 // F3: Purchase state machine
 // States: idle -> checking -> awaiting_permit -> awaiting_approval -> pending -> confirming -> success | error
-let purchaseState = { state: "idle", txHash: null, tokenId: null, error: null, blockNumber: null };
+let purchaseState = { state: "idle", txHash: null, tokenId: null, error: null, blockNumber: null, subscriptionExpiresAt: null };
 
 function setPurchaseState(next) {
   purchaseState = { ...purchaseState, ...next };
@@ -2862,11 +2953,20 @@ function renderPurchaseStateBars() {
   }
   else if (state === "success") {
     const explorerBase = explorerBaseUrl(chain?.id);
+    const { subscriptionExpiresAt } = purchaseState;
     for (const bar of bars) {
       bar.innerHTML = "";
       bar.style.color = "#16a34a";
       bar.appendChild(el("span", { text: `Redeemed!${tokenId != null ? ` NFT #${tokenId} received` : ""} ` }));
-      bar.appendChild(el("a", { href: "#/my", text: "View My NFTs" }));
+      // F20: show subscription expiry if present
+      if (subscriptionExpiresAt) {
+        const expiryDate = new Date(subscriptionExpiresAt * 1000).toLocaleString();
+        bar.appendChild(el("span", {
+          style: "margin-left:6px;color:#1d4ed8;font-weight:500;",
+          text: `Your subscription expires: ${expiryDate}`
+        }));
+      }
+      bar.appendChild(el("a", { href: "#/my", text: " View My NFTs" }));
     }
     return;
   }
@@ -2912,8 +3012,9 @@ async function buyWithStateMachine({ itemId, quantity, recipient, extraData, eth
         })
     });
 
-    // Try to read firstTokenId from logs
+    // Try to read firstTokenId and subscription expiry from logs
     let tokenId = null;
+    let subscriptionExpiresAt = null;
     try {
       if (lastTx?.hash) {
         const receipt = await publicClient.getTransactionReceipt({ hash: lastTx.hash });
@@ -2922,7 +3023,15 @@ async function buyWithStateMachine({ itemId, quantity, recipient, extraData, eth
             const decoded = decodeEventLog({ abi: myShopItemsAbi, data: log.data, topics: log.topics });
             if (decoded?.eventName === "Purchased" && decoded.args?.firstTokenId != null) {
               tokenId = decoded.args.firstTokenId.toString();
-              break;
+            }
+          } catch {
+            // skip
+          }
+          // F20: decode SubscriptionGranted to get expiresAt
+          try {
+            const decoded = decodeEventLog({ abi: subscriptionActionAbi, data: log.data, topics: log.topics });
+            if (decoded?.eventName === "SubscriptionGranted" && decoded.args?.expiresAt != null) {
+              subscriptionExpiresAt = Number(decoded.args.expiresAt);
             }
           } catch {
             // skip
@@ -2932,7 +3041,7 @@ async function buyWithStateMachine({ itemId, quantity, recipient, extraData, eth
     } catch {
       // non-fatal
     }
-    setPurchaseState({ state: "success", tokenId });
+    setPurchaseState({ state: "success", tokenId, subscriptionExpiresAt });
   } catch (e) {
     const errMsg = getErrorText(e);
     setPurchaseState({ state: "error", error: errMsg });
@@ -3113,6 +3222,48 @@ async function renderItemDetail(container, itemId) {
   out.appendChild(kv("action", item.action && !isZeroAddress(item.action) ? addressNode(item.action) : "none"));
   out.appendChild(kv("actionDataBytes", String(parseBytesLen(item.actionData) ?? "")));
   out.appendChild(kv("actionData", item.actionData ? shortText(String(item.actionData), 80) : ""));
+
+  // F20: Subscription badge + duration display
+  const subActionAddrDet = runtimeCfg.subscriptionActionAddress;
+  const isSubscriptionItem = subActionAddrDet && item.action && isAddress(subActionAddrDet) &&
+    item.action.toLowerCase() === subActionAddrDet.toLowerCase();
+  if (isSubscriptionItem) {
+    container.insertBefore(
+      el("span", {
+        style: "display:inline-block;background:#2563eb;color:#fff;border-radius:4px;padding:2px 9px;font-size:0.9em;margin-bottom:6px;",
+        text: "Subscription"
+      }),
+      out
+    );
+    // Decode durationSeconds from actionData: abi.encode(address nftContract, uint256 durationSeconds)
+    try {
+      const adBytes = item.actionData;
+      if (adBytes && adBytes !== "0x" && adBytes.length >= 130) {
+        // actionData = abi.encode(address, uint256): 32 bytes padded address + 32 bytes uint256
+        const durationHex = "0x" + String(adBytes).slice(2 + 64, 2 + 128);
+        const durationSeconds = Number(BigInt(durationHex));
+        out.appendChild(kv("duration", _formatSubscriptionDuration(durationSeconds)));
+      }
+    } catch {
+      // non-fatal: actionData may not be decodable
+    }
+  }
+
+  // F19: x402 "API Access" badge + resource URI in item detail
+  if (isX402Item(item)) {
+    container.insertBefore(
+      el("span", {
+        style: "display:inline-block;background:#7c3aed;color:#fff;border-radius:4px;padding:2px 9px;font-size:0.9em;margin-bottom:6px;",
+        text: "API Access"
+      }),
+      out
+    );
+    const resourceUri = decodeX402ResourceUri(item.actionData);
+    if (resourceUri) {
+      out.appendChild(kv("Access Resource", el("span", { text: `This item grants access to: ${resourceUri}`, style: "color:#7c3aed;font-weight:500;" })));
+    }
+  }
+
   const tokenUriHttp = toHttpUri(item.tokenURI);
   out.appendChild(kv("tokenURI", tokenUriHttp ? el("a", { href: tokenUriHttp, target: "_blank", rel: "noreferrer", text: tokenUriHttp }) : (item.tokenURI || "")));
 
@@ -3359,9 +3510,237 @@ async function renderPurchasesPage(container, query = {}) {
   await load();
 }
 
+
+// ============================================================
+// M7 — F21: YAAAClient passkey wallet integration
+// All code is gated by VITE_ENABLE_GASLESS and wrapped in
+// try/catch so failures never break the standard buy flow.
+// ============================================================
+
+/**
+ * Attempt to load YAAAClient from the local AAStar SDK build.
+ * Returns null (not throws) if the SDK is unavailable.
+ * Result is cached after first call.
+ */
+async function loadYAAAClient() {
+  if (_aaaClientCache !== null) return _aaaClientCache;
+  try {
+    // Dynamic import from the pre-built SDK path.
+    // TODO: replace with 'import("@aastar/airaccount")' once the npm package is published.
+    const mod = await import(
+      /* @vite-ignore */
+      "/Users/jason/Dev/mycelium/my-exploration/projects/aastar-sdk/packages/airaccount/dist/index.js"
+    );
+    const YAAAClient = mod.YAAAClient ?? null;
+    if (!YAAAClient) {
+      _aaaClientCache = null;
+      return null;
+    }
+    _aaaClientCache = YAAAClient;
+    return YAAAClient;
+  } catch {
+    _aaaClientCache = null;
+    return null;
+  }
+}
+
+/**
+ * Create an AirAccount passkey-backed AA wallet.
+ * Prompts the user for their email address, then calls YAAAClient.passkey.register().
+ * Returns the AA wallet address string, or null on failure.
+ */
+async function createPasskeyWallet() {
+  try {
+    const YAAAClient = await loadYAAAClient();
+    if (!YAAAClient) {
+      setText("txOut", "AirAccount SDK not available — passkey wallet requires @aastar/airaccount");
+      return null;
+    }
+    const email = window.prompt("Enter your email for AirAccount passkey registration:");
+    if (!email) return null;
+
+    const apiURL = "https://api.airaccount.aastar.io"; // AAStar hosted AirAccount service
+    const client = new YAAAClient({ apiURL });
+    const result = await client.passkey.register({ email });
+    const walletAddr = result?.walletAddress ?? result?.accountAddress ?? null;
+    if (walletAddr) {
+      aaWalletAddress = walletAddr;
+      setText("txOut", "Passkey wallet created: " + walletAddr);
+      // Refresh buyer page display
+      const aaAddrEl = document.getElementById("aaWalletAddr");
+      if (aaAddrEl) aaAddrEl.textContent = walletAddr;
+      const aaBadgeEl = document.getElementById("aaWalletBadge");
+      if (aaBadgeEl) aaBadgeEl.style.display = "";
+    }
+    return walletAddr;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    setText("txOut", "Passkey wallet creation failed: " + msg);
+    return null;
+  }
+}
+
+/**
+ * Sign a UserOp calldata with the user's passkey.
+ * Returns hex signature string, or null on failure.
+ */
+async function signWithPasskey(calldata) {
+  try {
+    const YAAAClient = await loadYAAAClient();
+    if (!YAAAClient) return null;
+
+    const apiURL = "https://api.airaccount.aastar.io";
+    const client = new YAAAClient({ apiURL });
+    // verifyTransaction triggers a passkey browser dialog and returns a signature
+    const result = await client.passkey.verifyTransaction({ calldata });
+    return result?.credential?.signature ?? result?.signature ?? null;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    setText("txOut", "Passkey sign failed: " + msg);
+    return null;
+  }
+}
+
+/**
+ * Full gasless buy flow (F21):
+ *  1. POST /gasless-permit  → calldata + paymasterData
+ *  2. signWithPasskey(calldata) → userOpSignature
+ *  3. POST /gasless-submit  → { userOpHash, status }
+ */
+async function submitGaslessBuy(itemId, quantity, recipient) {
+  const workerUrl = getCurrentCfgValue("workerUrl");
+  if (!workerUrl) throw new Error("workerUrl not configured — set it in #/config");
+
+  const buyer = aaWalletAddress || connectedAddress;
+  if (!buyer) throw new Error("No wallet connected. Connect MetaMask or create a Passkey wallet.");
+
+  setText("txOut", "Gasless: requesting permit…");
+
+  // Step 1: Get signed permit + calldata from worker
+  const permitRes = await fetch(`${workerUrl}/gasless-permit`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ itemId, buyerAddress: buyer, quantity })
+  });
+  const permitJson = await permitRes.json();
+  if (!permitRes.ok || !permitJson.ok) {
+    throw new Error(permitJson.error || "gasless-permit failed: HTTP " + permitRes.status);
+  }
+
+  const { calldata } = permitJson;
+
+  // Step 2: Sign with passkey (may fall back to showing calldata if SDK unavailable)
+  setText("txOut", "Gasless: signing with passkey…");
+  let userOpSignature;
+  try {
+    const YAAAClient = await loadYAAAClient();
+    if (!YAAAClient) {
+      // SDK not available — show the modal like M2's stub so user can copy calldata
+      _showGaslessStubModal(permitJson);
+      return;
+    }
+    userOpSignature = await signWithPasskey(calldata);
+    if (!userOpSignature) {
+      _showGaslessStubModal(permitJson);
+      return;
+    }
+  } catch {
+    _showGaslessStubModal(permitJson);
+    return;
+  }
+
+  // Step 3: Submit UserOp to bundler via worker
+  setText("txOut", "Gasless: submitting UserOp…");
+  const submitRes = await fetch(`${workerUrl}/gasless-submit`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      itemId,
+      buyerAddress: buyer,
+      quantity,
+      userOpSignature,
+      calldata
+    })
+  });
+  const submitJson = await submitRes.json();
+  if (!submitRes.ok || !submitJson.ok) {
+    throw new Error(submitJson.error || "gasless-submit failed: HTTP " + submitRes.status);
+  }
+
+  setText("txOut", "Gasless buy submitted! UserOp hash: " + submitJson.userOpHash);
+}
+
+/**
+ * Fallback: show the M2-style modal with calldata so the user can
+ * inspect or manually submit via a third-party SDK.
+ */
+function _showGaslessStubModal(permitJson) {
+  const modal = document.createElement("div");
+  modal.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center";
+  const box = document.createElement("div");
+  box.style.cssText = "background:#fff;border-radius:8px;padding:20px;max-width:700px;width:90%;max-height:80vh;overflow:auto";
+  box.appendChild(Object.assign(document.createElement("h3"), { textContent: "Gasless Buy — Permit + Calldata" }));
+  box.appendChild(Object.assign(document.createElement("p"), {
+    textContent: "AirAccount SDK unavailable. The worker signed a SerialPermit and encoded buyGasless() calldata. Copy into your SDK UserOp builder."
+  }));
+  const pre = document.createElement("pre");
+  pre.style.cssText = "font-size:0.75em;white-space:pre-wrap;word-break:break-all;background:#f8fafc;padding:12px;border-radius:4px";
+  pre.textContent = JSON.stringify(permitJson, null, 2);
+  box.appendChild(pre);
+  const closeBtn = document.createElement("button");
+  closeBtn.textContent = "Close";
+  closeBtn.onclick = () => document.body.removeChild(modal);
+  box.appendChild(closeBtn);
+  modal.appendChild(box);
+  modal.addEventListener("click", (e) => { if (e.target === modal) document.body.removeChild(modal); });
+  document.body.appendChild(modal);
+}
+
 async function renderBuyer(container) {
   container.appendChild(el("h2", { text: "买家入口（Buyer）" }));
   container.appendChild(el("div", { text: "流程：选 item →（可选）请求串号签名 → approve → buy" }));
+
+  // F22: Wallet identity display
+  // Show AA smart wallet badge when connected via passkey, otherwise show EOA address.
+  const walletIdentityDiv = el("div", { style: "margin: 8px 0; padding: 8px; border: 1px solid #e5e7eb; border-radius: 6px; background: #f9fafb;" });
+  if (aaWalletAddress) {
+    // AA wallet detected — show "Smart Wallet (Passkey)" badge
+    walletIdentityDiv.appendChild(el("span", {
+      style: "display:inline-block;padding:2px 8px;border-radius:12px;background:#6366f1;color:#fff;font-size:0.8em;margin-right:8px;",
+      text: "Smart Wallet (Passkey)"
+    }));
+    walletIdentityDiv.appendChild(el("span", { id: "aaWalletAddr", text: aaWalletAddress, style: "font-family:monospace;font-size:0.85em;" }));
+    if (connectedAddress) {
+      walletIdentityDiv.appendChild(el("div", { style: "font-size:0.8em;color:#6b7280;margin-top:4px;", text: "Signing key (EOA): " + connectedAddress }));
+    }
+  } else if (connectedAddress) {
+    walletIdentityDiv.appendChild(el("span", { text: "EOA Wallet: ", style: "font-weight:bold;" }));
+    walletIdentityDiv.appendChild(el("span", { text: connectedAddress, style: "font-family:monospace;font-size:0.85em;" }));
+  } else {
+    walletIdentityDiv.appendChild(el("span", { text: "未连接钱包 — 请先 Connect Wallet", style: "color:#b91c1c;" }));
+  }
+
+  // F22: "Create Passkey Wallet" button — visible when enableGasless=true and no AA wallet
+  const aaWalletBadge = el("div", { id: "aaWalletBadge", style: aaWalletAddress ? "" : "display:none" }, [
+    el("span", { style: "display:inline-block;padding:2px 8px;border-radius:12px;background:#6366f1;color:#fff;font-size:0.8em;", text: "Smart Wallet (Passkey) active" })
+  ]);
+
+  container.appendChild(walletIdentityDiv);
+  container.appendChild(aaWalletBadge);
+
+  if (runtimeCfg.enableGasless && !aaWalletAddress) {
+    container.appendChild(
+      el("div", { style: "margin: 8px 0;" }, [
+        el("button", {
+          id: "btnCreatePasskeyWallet",
+          text: "Create Passkey Wallet (AirAccount)",
+          style: "background:#6366f1;color:#fff;border:none;border-radius:4px;padding:6px 14px;cursor:pointer;",
+          onclick: () => createPasskeyWallet().catch(showTxError)
+        }),
+        el("span", { text: " — create a gasless ERC-4337 smart wallet backed by your device passkey", style: "font-size:0.85em;color:#6b7280;margin-left:8px;" })
+      ])
+    );
+  }
 
   container.appendChild(
     el("div", {}, [
@@ -3392,7 +3771,15 @@ async function renderBuyer(container) {
       inputRow("extraData(hex)", "buyExtraData", "0x"),
       el("button", { text: "Fetch extraData", onclick: () => fetchSerialExtraData().catch(showTxError) }),
       inputRow("ethValue(optional)", "buyEthValue", ""),
-      el("button", { id: "btnBuy", text: "Buy", onclick: () => buy().catch(showTxError) })
+      el("button", { id: "btnBuy", text: "Buy", onclick: () => buy().catch(showTxError) }),
+      ...(runtimeCfg.enableGasless ? [
+        el("button", {
+          id: "btnBuyGasless",
+          text: "Buy with Smart Wallet (Gasless)",
+          style: "margin-left:8px;background:#6366f1;color:#fff;border:none;border-radius:4px;",
+          onclick: () => submitGaslessBuy(val("buyItemId"), val("buyQty") || "1", val("buyRecipient") || connectedAddress || "").catch(showTxError)
+        })
+      ] : [])
     ])
   );
 
@@ -4074,11 +4461,21 @@ async function renderConfig(container) {
       inputRow("ITEMS_ACTION_ADDRESS (MintERC20Action)", "itemsActionAddress"),
       inputRow("ERC721_ACTION_ADDRESS (MintERC721Action)", "erc721ActionAddress"),
       inputRow("ERC721_DEFAULT_TEMPLATE_ID (uint256)", "defaultTemplateId"),
+      inputRow("X402_ACTION_ADDRESS (X402AccessAction — API Access)", "x402ActionAddress"),
+      inputRow("SUBSCRIPTION_ACTION_ADDRESS (SubscriptionAction — M6)", "subscriptionActionAddress"),
       inputRow("WORKER_URL (permit)", "workerUrl"),
       inputRow("WORKER_API_URL (query)", "workerApiUrl"),
       inputRow("IPFS_GATEWAY (eg. https://gw.example.com)", "ipfsGateway"),
       inputRow("APNTS_SALE_URL", "apntsSaleUrl"),
       inputRow("GTOKEN_SALE_URL", "gtokenSaleUrl"),
+      el("hr"),
+      el("h3", { text: "M7 — AirAccount / Gasless (ERC-4337)" }),
+      el("div", {}, [
+        el("input", { id: "enableGasless", type: "checkbox" }),
+        el("span", { text: " ENABLE_GASLESS — show gasless buy button (M7 / ERC-4337 + AirAccount passkey)" })
+      ]),
+      inputRow("AIRACCOUNT_FACTORY (Sepolia default)", "airaccountFactory"),
+      inputRow("BUNDLER_URL (ERC-4337 bundler RPC)", "bundlerUrl"),
       el("button", {
         text: "Fill from env",
         onclick: () => {
@@ -4089,11 +4486,16 @@ async function renderConfig(container) {
           document.getElementById("itemsActionAddress").value = envCfg.itemsActionAddress || "";
           document.getElementById("erc721ActionAddress").value = envCfg.erc721ActionAddress || "";
           document.getElementById("defaultTemplateId").value = envCfg.defaultTemplateId || "";
+          document.getElementById("x402ActionAddress").value = envCfg.x402ActionAddress || "";
+          document.getElementById("subscriptionActionAddress").value = envCfg.subscriptionActionAddress || "";
           document.getElementById("workerUrl").value = envCfg.workerUrl || "";
           document.getElementById("workerApiUrl").value = envCfg.workerApiUrl || "";
           document.getElementById("ipfsGateway").value = envCfg.ipfsGateway || "";
           document.getElementById("apntsSaleUrl").value = envCfg.apntsSaleUrl || "";
           document.getElementById("gtokenSaleUrl").value = envCfg.gtokenSaleUrl || "";
+          document.getElementById("enableGasless").checked = Boolean(envCfg.enableGasless);
+          document.getElementById("airaccountFactory").value = envCfg.airaccountFactory || "0xa0007c5db27548d8c1582773856db1d123107383";
+          document.getElementById("bundlerUrl").value = envCfg.bundlerUrl || "";
         }
       }),
       el("button", {
@@ -4106,11 +4508,16 @@ async function renderConfig(container) {
           document.getElementById("itemsActionAddress").value = runtimeCfg.itemsActionAddress || "";
           document.getElementById("erc721ActionAddress").value = runtimeCfg.erc721ActionAddress || "";
           document.getElementById("defaultTemplateId").value = runtimeCfg.defaultTemplateId || "";
+          document.getElementById("x402ActionAddress").value = runtimeCfg.x402ActionAddress || "";
+          document.getElementById("subscriptionActionAddress").value = runtimeCfg.subscriptionActionAddress || "";
           document.getElementById("workerUrl").value = runtimeCfg.workerUrl || "";
           document.getElementById("workerApiUrl").value = runtimeCfg.workerApiUrl || "";
           document.getElementById("ipfsGateway").value = runtimeCfg.ipfsGateway || "";
           document.getElementById("apntsSaleUrl").value = runtimeCfg.apntsSaleUrl || "";
           document.getElementById("gtokenSaleUrl").value = runtimeCfg.gtokenSaleUrl || "";
+          document.getElementById("enableGasless").checked = Boolean(runtimeCfg.enableGasless);
+          document.getElementById("airaccountFactory").value = runtimeCfg.airaccountFactory || "0xa0007c5db27548d8c1582773856db1d123107383";
+          document.getElementById("bundlerUrl").value = runtimeCfg.bundlerUrl || "";
         }
       }),
       el("button", { text: "Load from Worker /config", onclick: () => loadConfigFromWorker().catch(showTxError) }),
@@ -4130,11 +4537,16 @@ async function renderConfig(container) {
   document.getElementById("itemsActionAddress").value = runtimeCfg.itemsActionAddress || "";
   document.getElementById("erc721ActionAddress").value = runtimeCfg.erc721ActionAddress || "";
   document.getElementById("defaultTemplateId").value = runtimeCfg.defaultTemplateId || "";
+  document.getElementById("x402ActionAddress").value = runtimeCfg.x402ActionAddress || "";
+  document.getElementById("subscriptionActionAddress").value = runtimeCfg.subscriptionActionAddress || "";
   document.getElementById("workerUrl").value = runtimeCfg.workerUrl || "";
   document.getElementById("workerApiUrl").value = runtimeCfg.workerApiUrl || "";
   document.getElementById("ipfsGateway").value = runtimeCfg.ipfsGateway || "";
   document.getElementById("apntsSaleUrl").value = runtimeCfg.apntsSaleUrl || "";
   document.getElementById("gtokenSaleUrl").value = runtimeCfg.gtokenSaleUrl || "";
+  document.getElementById("enableGasless").checked = Boolean(runtimeCfg.enableGasless);
+  document.getElementById("airaccountFactory").value = runtimeCfg.airaccountFactory || "0xa0007c5db27548d8c1582773856db1d123107383";
+  document.getElementById("bundlerUrl").value = runtimeCfg.bundlerUrl || "";
 }
 
 async function renderRolesPage(container, query = {}) {

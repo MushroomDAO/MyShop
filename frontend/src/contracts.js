@@ -455,6 +455,16 @@ export const erc20Abi = [
   }
 ];
 
+// M6 F20: SubscriptionAction event ABI
+export const subscriptionActionAbi = [
+  { name: "SubscriptionGranted", type: "event", inputs: [
+    { name: "subscriber", type: "address", indexed: true },
+    { name: "nftContract", type: "address", indexed: true },
+    { name: "tokenId", type: "uint256", indexed: true },
+    { name: "expiresAt", type: "uint256", indexed: false }
+  ]}
+];
+
 export const SHOP_ROLE_SHOP_ADMIN = 1;
 export const SHOP_ROLE_ITEM_MAINTAINER = 2;
 export const SHOP_ROLE_ITEM_EDITOR = 4;

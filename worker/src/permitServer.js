@@ -2,11 +2,12 @@ import http from "node:http";
 import { URL } from "node:url";
 import { openDb, getDbPath } from "./db.js";
 
-import { encodeAbiParameters, getAddress, http as httpTransport, keccak256, parseAbiParameters, toBytes } from "viem";
+import { encodeAbiParameters, encodeFunctionData, getAddress, http as httpTransport, keccak256, parseAbiParameters, toBytes } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { createPublicClient, createWalletClient } from "viem";
 
 import { myShopItemsAbi } from "./abi.js";
+import { handleGaslessSubmit } from "./gaslessRelay.js";
 
 class RateLimitError extends Error {
   constructor({ message = "rate_limited", retryAfterMs = null } = {}) {
@@ -33,7 +34,9 @@ export async function startPermitServer({
   serialSignerPrivateKey,
   riskSignerPrivateKey,
   serialIssuerUrl,
-  port
+  port,
+  bundlerUrl,
+  paymasterUrl
 }) {
   const publicClient = createPublicClient({
     chain,
@@ -261,7 +264,7 @@ export async function startPermitServer({
         return;
       }
 
-      if (limiter.enabled && (url.pathname === "/serial-permit" || url.pathname === "/risk-allowance")) {
+      if (limiter.enabled && (url.pathname === "/serial-permit" || url.pathname === "/risk-allowance" || url.pathname === "/gasless-permit" || url.pathname === "/gasless-submit")) {
         _rateLimitOrThrow({ req, url, limiter });
       }
 
@@ -411,6 +414,131 @@ export async function startPermitServer({
         });
         stats.okTotal += 1;
         stats.okRiskAllowanceTotal += 1;
+        return;
+      }
+
+      // W8: gasless permit — POST /gasless-permit
+      // Returns a signed SerialPermit + encoded buyGasless() calldata so the
+      // frontend can construct a full ERC-4337 UserOp without additional RPC calls.
+      if (url.pathname === "/gasless-permit") {
+        _requireMethod(req, ["POST"]);
+        if (!walletClients.serial) {
+          throw new HttpError({
+            status: 500,
+            code: "signer_not_configured",
+            message: "SERIAL_SIGNER_PRIVATE_KEY not set"
+          });
+        }
+
+        const body = await _readJsonBody(req);
+        const { itemId: itemIdRaw, buyerAddress: buyerRaw, quantity: quantityRaw, serialHash: serialHashParam } = body ?? {};
+
+        if (!itemIdRaw) throw new HttpError({ status: 400, code: "missing_param", message: "Missing: itemId", details: { param: "itemId" } });
+        if (!buyerRaw) throw new HttpError({ status: 400, code: "missing_param", message: "Missing: buyerAddress", details: { param: "buyerAddress" } });
+        if (!quantityRaw) throw new HttpError({ status: 400, code: "missing_param", message: "Missing: quantity", details: { param: "quantity" } });
+
+        let buyer;
+        try { buyer = getAddress(String(buyerRaw)); } catch {
+          throw new HttpError({ status: 400, code: "invalid_param", message: "Invalid address: buyerAddress", details: { param: "buyerAddress" } });
+        }
+
+        if (!/^\d+$/.test(String(itemIdRaw))) throw new HttpError({ status: 400, code: "invalid_param", message: "Invalid uint: itemId", details: { param: "itemId" } });
+        const itemId = BigInt(String(itemIdRaw));
+        if (itemId < 1n) throw new HttpError({ status: 400, code: "invalid_param", message: "itemId must be >= 1", details: { param: "itemId" } });
+
+        if (!/^\d+$/.test(String(quantityRaw))) throw new HttpError({ status: 400, code: "invalid_param", message: "Invalid uint: quantity", details: { param: "quantity" } });
+        const quantity = BigInt(String(quantityRaw));
+        if (quantity < 1n) throw new HttpError({ status: 400, code: "invalid_param", message: "quantity must be >= 1", details: { param: "quantity" } });
+
+        let serialHash;
+        if (serialHashParam) {
+          if (!/^0x[0-9a-fA-F]{64}$/.test(String(serialHashParam))) {
+            throw new HttpError({ status: 400, code: "invalid_param", message: "Invalid bytes32: serialHash", details: { param: "serialHash" } });
+          }
+          serialHash = String(serialHashParam);
+        } else {
+          const seed = `myshop:gaslessPermit:v1:${buyer}:${itemId.toString()}`;
+          serialHash = keccak256(toBytes(seed));
+        }
+
+        const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+        const nonce = await _resolveNonce(publicClient, itemsAddress, buyer, null);
+
+        const signature = await walletClients.serial.signTypedData({
+          domain: { name: "MyShop", version: "1", chainId: domainChainId, verifyingContract: getAddress(itemsAddress) },
+          types: {
+            SerialPermit: [
+              { name: "itemId", type: "uint256" },
+              { name: "buyer", type: "address" },
+              { name: "serialHash", type: "bytes32" },
+              { name: "deadline", type: "uint256" },
+              { name: "nonce", type: "uint256" }
+            ]
+          },
+          primaryType: "SerialPermit",
+          message: { itemId, buyer, serialHash, deadline, nonce }
+        });
+
+        const extraData = encodeAbiParameters(
+          parseAbiParameters("bytes32 serialHash,uint256 deadline,uint256 nonce,bytes sig"),
+          [serialHash, deadline, nonce, signature]
+        );
+
+        const buyGaslessAbi = [
+          {
+            type: "function",
+            name: "buyGasless",
+            stateMutability: "payable",
+            inputs: [
+              { name: "itemId", type: "uint256" },
+              { name: "quantity", type: "uint256" },
+              { name: "recipient", type: "address" },
+              { name: "payer", type: "address" },
+              { name: "extraData", type: "bytes" }
+            ],
+            outputs: [{ name: "firstTokenId", type: "uint256" }]
+          }
+        ];
+
+        const calldata = encodeFunctionData({
+          abi: buyGaslessAbi,
+          functionName: "buyGasless",
+          args: [itemId, quantity, buyer, buyer, extraData]
+        });
+
+        const SUPER_PAYMASTER_ADDRESS = process.env.SUPER_PAYMASTER_ADDRESS || "0x829C3178DeF488C2dB65207B4225e18824696860";
+
+        _json(res, 200, {
+          ok: true,
+          buyer,
+          itemId: itemId.toString(),
+          quantity: quantity.toString(),
+          serialHash,
+          deadline: deadline.toString(),
+          nonce: nonce.toString(),
+          signature,
+          extraData,
+          calldata,
+          paymasterData: {
+            paymasterAddress: SUPER_PAYMASTER_ADDRESS,
+            chainId: domainChainId,
+            itemsContract: getAddress(itemsAddress)
+          }
+        });
+        stats.okTotal += 1;
+        return;
+      }
+
+      // W17: gasless submit — POST /gasless-submit
+      // Accepts a signed UserOp and submits it to the ERC-4337 bundler.
+      if (url.pathname === "/gasless-submit") {
+        _requireMethod(req, ["POST"]);
+        await handleGaslessSubmit(req, res, {
+          chainId: domainChainId,
+          bundlerUrl: bundlerUrl || null,
+          paymasterUrl: paymasterUrl || null
+        });
+        stats.okTotal += 1;
         return;
       }
 
