@@ -16,7 +16,8 @@ export function loadConfig() {
     itemsActionAddress: import.meta.env.VITE_ITEMS_ACTION_ADDRESS ?? defaults.itemsActionAddress ?? "",
     erc721ActionAddress: import.meta.env.VITE_ERC721_ACTION_ADDRESS ?? defaults.erc721ActionAddress ?? "",
     defaultTemplateId: import.meta.env.VITE_ERC721_DEFAULT_TEMPLATE_ID ?? defaults.defaultTemplateId ?? "",
-    ipfsGateway: import.meta.env.VITE_IPFS_GATEWAY ?? defaults.ipfsGateway ?? ""
+    ipfsGateway: import.meta.env.VITE_IPFS_GATEWAY ?? defaults.ipfsGateway ?? "",
+    subscriptionActionAddress: import.meta.env.VITE_SUBSCRIPTION_ACTION_ADDRESS ?? ""
   };
 
   const cfg = {
@@ -31,7 +32,8 @@ export function loadConfig() {
     itemsActionAddress: raw.itemsActionAddress ?? "",
     erc721ActionAddress: raw.erc721ActionAddress ?? "",
     defaultTemplateId: raw.defaultTemplateId ?? "",
-    ipfsGateway: raw.ipfsGateway ?? ""
+    ipfsGateway: raw.ipfsGateway ?? "",
+    subscriptionActionAddress: raw.subscriptionActionAddress ?? ""
   };
 
   return cfg;

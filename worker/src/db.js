@@ -59,6 +59,19 @@ export function openDb() {
       issued_at INTEGER NOT NULL,
       PRIMARY KEY (chain_id, item_id, buyer, nonce)
     );
+
+    -- W16: subscription expiry tracking
+    CREATE TABLE IF NOT EXISTS subscriptions (
+      token_id TEXT NOT NULL,
+      nft_contract TEXT NOT NULL,
+      subscriber TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      item_id TEXT,
+      notified INTEGER DEFAULT 0,
+      PRIMARY KEY (nft_contract, token_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_subscriptions_expires ON subscriptions(expires_at);
+    CREATE INDEX IF NOT EXISTS idx_subscriptions_subscriber ON subscriptions(subscriber);
   `);
 
   // Migration: copy old issued_nonces (no chain_id) into issued_nonces_v2 with chain_id=0, then drop
