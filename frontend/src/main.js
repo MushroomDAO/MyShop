@@ -7,8 +7,7 @@ import {
   getDefaultShopRoleConfig,
   erc20Abi,
   myShopItemsAbi,
-  myShopsAbi,
-  subscriptionActionAbi
+  myShopsAbi
 } from "./contracts.js";
 
 // F7: mobile-responsive base styles
@@ -83,11 +82,7 @@ function getRuntimeConfig() {
     workerApiUrl: stored.workerApiUrl || envCfg.workerApiUrl || "",
     apntsSaleUrl: stored.apntsSaleUrl || envCfg.apntsSaleUrl || "",
     gtokenSaleUrl: stored.gtokenSaleUrl || envCfg.gtokenSaleUrl || "",
-    ipfsGateway: stored.ipfsGateway || envCfg.ipfsGateway || "",
-    disputeEscrowAddress: stored.disputeEscrowAddress || envCfg.disputeEscrowAddress || "",
-    disputeWindowSeconds: stored.disputeWindowSeconds || envCfg.disputeWindowSeconds || 604800,
-    x402ActionAddress: stored.x402ActionAddress || envCfg.x402ActionAddress || "",
-    subscriptionActionAddress: stored.subscriptionActionAddress || envCfg.subscriptionActionAddress || ""
+    ipfsGateway: stored.ipfsGateway || envCfg.ipfsGateway || ""
   };
 }
 
@@ -411,37 +406,6 @@ function formatItemSummary(item, { includeShopId } = {}) {
   const shopPart = includeShopId ? ` shopId=${item.shopId}` : "";
   const tokenUriPart = tokenUriLabel ? ` tokenURI=${tokenUriLabel}` : "";
   return ` src=${item.__source || ""}${shopPart} active=${item.active} payToken=${formatPayToken(item.payToken)} unitPrice=${item.unitPrice} requiresSerial=${item.requiresSerial} soulbound=${item.soulbound} action=${actionLabel} nft=${nftLabel}${tokenUriPart}`;
-}
-
-// F19: Returns true if item's action matches the configured X402AccessAction address.
-function isX402Item(item) {
-  const x402Addr = runtimeCfg.x402ActionAddress;
-  if (!x402Addr || !item?.action) return false;
-  try {
-    return getAddress(item.action) === getAddress(x402Addr);
-  } catch {
-    return false;
-  }
-}
-
-// F19: Attempt to decode resourceUri from actionData: abi.encode(address accessNft, string resourceUri).
-function decodeX402ResourceUri(actionData) {
-  if (!actionData || actionData === "0x" || actionData.length < 10) return null;
-  try {
-    const hex = String(actionData).replace(/^0x/, "");
-    if (hex.length < 128) return null;
-    const strOffset = parseInt(hex.slice(64, 128), 16);
-    const strHexOffset = strOffset * 2;
-    if (strHexOffset + 64 > hex.length) return null;
-    const strLen = parseInt(hex.slice(strHexOffset, strHexOffset + 64), 16);
-    if (strLen === 0) return null;
-    const strDataHex = hex.slice(strHexOffset + 64, strHexOffset + 64 + strLen * 2);
-    if (strDataHex.length < strLen * 2) return null;
-    const bytes = strDataHex.match(/.{1,2}/g).map((b) => parseInt(b, 16));
-    return new TextDecoder().decode(new Uint8Array(bytes));
-  } catch {
-    return null;
-  }
 }
 
 function sourceCountsLabel(list, getSource) {
@@ -2046,8 +2010,7 @@ function applyConfigFromInputs() {
     workerApiUrl: val("workerApiUrl") || "",
     ipfsGateway: val("ipfsGateway") || "",
     apntsSaleUrl: val("apntsSaleUrl") || "",
-    gtokenSaleUrl: val("gtokenSaleUrl") || "",
-    x402ActionAddress: val("x402ActionAddress") || ""
+    gtokenSaleUrl: val("gtokenSaleUrl") || ""
   };
   runtimeCfg = next;
   saveStoredConfig(next);
@@ -2228,17 +2191,9 @@ async function renderPlaza(container) {
       const nftLabel = item.nftContract && !isZeroAddress(item.nftContract) ? shortHex(item.nftContract) : "none";
       const actionBytes = parseBytesLen(item.actionData);
       const tokenUriLabel = item.tokenURI ? shortText(item.tokenURI, 36) : "";
-      // F19: x402 "API Access" badge
-      const x402Badge = isX402Item(item)
-        ? el("span", {
-            style: "background:#7c3aed;color:#fff;border-radius:4px;padding:2px 7px;font-size:0.85em;margin-left:5px;",
-            text: "API Access"
-          })
-        : null;
       itemsEl.appendChild(
         el("div", {}, [
           el("a", { href: `#/item/${it.itemId}`, text: `Item #${it.itemId}` }),
-          x402Badge,
           el("span", {
             text: formatItemSummary(item, { includeShopId: true })
           }),
@@ -2708,13 +2663,6 @@ async function renderShopDetail(container, shopId) {
           text: `Item #${it.itemId}`,
           style: "font-weight:bold"
         }));
-        // F19: x402 "API Access" badge on shop item card
-        if (isX402Item(item)) {
-          card.appendChild(el("span", {
-            text: "API Access",
-            style: "display:inline-block;padding:1px 7px;border-radius:4px;background:#7c3aed;color:#fff;font-size:0.8em;"
-          }));
-        }
         if (item?.tokenURI) {
           card.appendChild(el("div", { text: shortText(String(item.tokenURI), 40), style: "font-size:0.8em;color:#888" }));
         }
@@ -2914,18 +2862,10 @@ function renderPurchaseStateBars() {
   }
   else if (state === "success") {
     const explorerBase = explorerBaseUrl(chain?.id);
-    const { x402ResourceUri } = purchaseState;
     for (const bar of bars) {
       bar.innerHTML = "";
       bar.style.color = "#16a34a";
       bar.appendChild(el("span", { text: `Redeemed!${tokenId != null ? ` NFT #${tokenId} received` : ""} ` }));
-      // F19: show x402 access token info if this was an API Access item
-      if (x402ResourceUri && tokenId != null) {
-        bar.appendChild(el("span", {
-          style: "margin-left:6px;color:#7c3aed;font-weight:500;",
-          text: `Your access token: TokenID #${tokenId} — present this to access the API`
-        }));
-      }
       bar.appendChild(el("a", { href: "#/my", text: "View My NFTs" }));
     }
     return;
@@ -2972,9 +2912,8 @@ async function buyWithStateMachine({ itemId, quantity, recipient, extraData, eth
         })
     });
 
-    // Try to read firstTokenId and x402 access token info from logs
+    // Try to read firstTokenId from logs
     let tokenId = null;
-    let x402ResourceUri = null;
     try {
       if (lastTx?.hash) {
         const receipt = await publicClient.getTransactionReceipt({ hash: lastTx.hash });
@@ -2983,15 +2922,7 @@ async function buyWithStateMachine({ itemId, quantity, recipient, extraData, eth
             const decoded = decodeEventLog({ abi: myShopItemsAbi, data: log.data, topics: log.topics });
             if (decoded?.eventName === "Purchased" && decoded.args?.firstTokenId != null) {
               tokenId = decoded.args.firstTokenId.toString();
-            }
-          } catch {
-            // skip
-          }
-          // F19: decode X402AccessGranted to get resourceUri
-          try {
-            const decoded = decodeEventLog({ abi: x402AccessActionAbi, data: log.data, topics: log.topics });
-            if (decoded?.eventName === "X402AccessGranted" && decoded.args?.resourceUri != null) {
-              x402ResourceUri = String(decoded.args.resourceUri);
+              break;
             }
           } catch {
             // skip
@@ -3001,7 +2932,7 @@ async function buyWithStateMachine({ itemId, quantity, recipient, extraData, eth
     } catch {
       // non-fatal
     }
-    setPurchaseState({ state: "success", tokenId, x402ResourceUri });
+    setPurchaseState({ state: "success", tokenId });
   } catch (e) {
     const errMsg = getErrorText(e);
     setPurchaseState({ state: "error", error: errMsg });
@@ -3182,21 +3113,6 @@ async function renderItemDetail(container, itemId) {
   out.appendChild(kv("action", item.action && !isZeroAddress(item.action) ? addressNode(item.action) : "none"));
   out.appendChild(kv("actionDataBytes", String(parseBytesLen(item.actionData) ?? "")));
   out.appendChild(kv("actionData", item.actionData ? shortText(String(item.actionData), 80) : ""));
-  // F19: x402 "API Access" badge + resource URI in item detail
-  if (isX402Item(item)) {
-    container.insertBefore(
-      el("span", {
-        style: "display:inline-block;background:#7c3aed;color:#fff;border-radius:4px;padding:2px 9px;font-size:0.9em;margin-bottom:6px;",
-        text: "API Access"
-      }),
-      out
-    );
-    const resourceUri = decodeX402ResourceUri(item.actionData);
-    if (resourceUri) {
-      out.appendChild(kv("Access Resource", el("span", { text: `This item grants access to: ${resourceUri}`, style: "color:#7c3aed;font-weight:500;" })));
-    }
-  }
-
   const tokenUriHttp = toHttpUri(item.tokenURI);
   out.appendChild(kv("tokenURI", tokenUriHttp ? el("a", { href: tokenUriHttp, target: "_blank", rel: "noreferrer", text: tokenUriHttp }) : (item.tokenURI || "")));
 
@@ -4158,7 +4074,6 @@ async function renderConfig(container) {
       inputRow("ITEMS_ACTION_ADDRESS (MintERC20Action)", "itemsActionAddress"),
       inputRow("ERC721_ACTION_ADDRESS (MintERC721Action)", "erc721ActionAddress"),
       inputRow("ERC721_DEFAULT_TEMPLATE_ID (uint256)", "defaultTemplateId"),
-      inputRow("X402_ACTION_ADDRESS (X402AccessAction — API Access)", "x402ActionAddress"),
       inputRow("WORKER_URL (permit)", "workerUrl"),
       inputRow("WORKER_API_URL (query)", "workerApiUrl"),
       inputRow("IPFS_GATEWAY (eg. https://gw.example.com)", "ipfsGateway"),
@@ -4174,7 +4089,6 @@ async function renderConfig(container) {
           document.getElementById("itemsActionAddress").value = envCfg.itemsActionAddress || "";
           document.getElementById("erc721ActionAddress").value = envCfg.erc721ActionAddress || "";
           document.getElementById("defaultTemplateId").value = envCfg.defaultTemplateId || "";
-          document.getElementById("x402ActionAddress").value = envCfg.x402ActionAddress || "";
           document.getElementById("workerUrl").value = envCfg.workerUrl || "";
           document.getElementById("workerApiUrl").value = envCfg.workerApiUrl || "";
           document.getElementById("ipfsGateway").value = envCfg.ipfsGateway || "";
@@ -4192,7 +4106,6 @@ async function renderConfig(container) {
           document.getElementById("itemsActionAddress").value = runtimeCfg.itemsActionAddress || "";
           document.getElementById("erc721ActionAddress").value = runtimeCfg.erc721ActionAddress || "";
           document.getElementById("defaultTemplateId").value = runtimeCfg.defaultTemplateId || "";
-          document.getElementById("x402ActionAddress").value = runtimeCfg.x402ActionAddress || "";
           document.getElementById("workerUrl").value = runtimeCfg.workerUrl || "";
           document.getElementById("workerApiUrl").value = runtimeCfg.workerApiUrl || "";
           document.getElementById("ipfsGateway").value = runtimeCfg.ipfsGateway || "";
@@ -4217,7 +4130,6 @@ async function renderConfig(container) {
   document.getElementById("itemsActionAddress").value = runtimeCfg.itemsActionAddress || "";
   document.getElementById("erc721ActionAddress").value = runtimeCfg.erc721ActionAddress || "";
   document.getElementById("defaultTemplateId").value = runtimeCfg.defaultTemplateId || "";
-  document.getElementById("x402ActionAddress").value = runtimeCfg.x402ActionAddress || "";
   document.getElementById("workerUrl").value = runtimeCfg.workerUrl || "";
   document.getElementById("workerApiUrl").value = runtimeCfg.workerApiUrl || "";
   document.getElementById("ipfsGateway").value = runtimeCfg.ipfsGateway || "";

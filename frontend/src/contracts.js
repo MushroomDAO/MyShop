@@ -455,26 +455,6 @@ export const erc20Abi = [
   }
 ];
 
-// F19: X402AccessAction event ABI (M5)
-export const x402AccessActionAbi = [
-  { name: "X402AccessGranted", type: "event", inputs: [
-    { name: "recipient", type: "address", indexed: true },
-    { name: "accessNft", type: "address", indexed: true },
-    { name: "tokenId", type: "uint256", indexed: true },
-    { name: "resourceUri", type: "string", indexed: false }
-  ]}
-];
-
-// M6 F20: SubscriptionAction event ABI
-export const subscriptionActionAbi = [
-  { name: "SubscriptionGranted", type: "event", inputs: [
-    { name: "subscriber", type: "address", indexed: true },
-    { name: "nftContract", type: "address", indexed: true },
-    { name: "tokenId", type: "uint256", indexed: true },
-    { name: "expiresAt", type: "uint256", indexed: false }
-  ]}
-];
-
 export const SHOP_ROLE_SHOP_ADMIN = 1;
 export const SHOP_ROLE_ITEM_MAINTAINER = 2;
 export const SHOP_ROLE_ITEM_EDITOR = 4;
