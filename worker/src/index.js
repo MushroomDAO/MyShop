@@ -7,6 +7,7 @@ import { getDeploymentDefaults } from "../../frontend/src/deployments.js";
 import { startApiServer } from "./apiServer.js";
 import { startPermitServer } from "./permitServer.js";
 import { watchPurchased } from "./watchPurchased.js";
+import { watchDisputes } from "./watchDisputes.js";
 
 const mode = optionalEnv("MODE", "both");
 
@@ -69,6 +70,21 @@ if (mode === "watch" || mode === "both") {
     log.error("watchPurchased fatal", { error: String(e) });
     process.exit(1);
   });
+
+  // W13: Watch DisputeEscrow events if address is configured
+  const disputeEscrowAddress = optionalEnv("DISPUTE_ESCROW_ADDRESS", "");
+  if (disputeEscrowAddress) {
+    watchDisputes({
+      rpcUrl,
+      chain,
+      escrowAddress: disputeEscrowAddress,
+      pollIntervalMs,
+      lookbackBlocks
+    }).catch((e) => {
+      log.error("watchDisputes fatal", { error: String(e) });
+      // non-fatal: dispute watcher failure doesn't kill the worker
+    });
+  }
 }
 
 if (mode === "permit" || mode === "both") {

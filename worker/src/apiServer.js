@@ -480,6 +480,34 @@ export async function startApiServer({ rpcUrl, chain, itemsAddress, port }) {
         return _json(res, 200, { ok: true, source: useIndex ? "index" : "chain", ...summary });
       }
 
+      // W14: Dispute routes — only when DISPUTE_ESCROW_ADDRESS is configured
+      const disputeEscrowAddress = process.env.DISPUTE_ESCROW_ADDRESS;
+      if (disputeEscrowAddress) {
+        // GET /disputes/:purchaseId
+        const disputeByIdMatch = url.pathname.match(/^\/disputes\/(0x[0-9a-fA-F]{64})$/);
+        if (disputeByIdMatch) {
+          const purchaseId = disputeByIdMatch[1].toLowerCase();
+          const db = openDb();
+          const row = db.prepare("SELECT * FROM disputes WHERE purchase_id = ?").get(purchaseId);
+          if (!row) return _json(res, 404, { ok: false, error: "no_dispute" });
+          return _json(res, 200, { ok: true, ...formatDispute(row) });
+        }
+
+        // GET /disputes?buyer=0x...
+        if (url.pathname === "/disputes") {
+          const buyer = url.searchParams.get("buyer");
+          const db = openDb();
+          let rows;
+          if (buyer) {
+            const buyerAddr = getAddress(buyer);
+            rows = db.prepare("SELECT * FROM disputes WHERE buyer = ? ORDER BY opened_at DESC LIMIT 100").all(buyerAddr);
+          } else {
+            rows = db.prepare("SELECT * FROM disputes ORDER BY opened_at DESC LIMIT 100").all();
+          }
+          return _json(res, 200, { ok: true, count: rows.length, disputes: rows.map(formatDispute) });
+        }
+      }
+
       return _json(res, 404, { ok: false, error: "not_found" });
     } catch (e) {
       return _json(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) });
@@ -505,6 +533,19 @@ export async function startApiServer({ rpcUrl, chain, itemsAddress, port }) {
         server.close((err) => (err ? reject(err) : resolve()));
       }),
     port
+  };
+}
+
+function formatDispute(row) {
+  return {
+    purchaseId: row.purchase_id,
+    buyer: row.buyer,
+    status: row.status,
+    payToken: row.pay_token,
+    amount: row.amount,
+    openedAt: row.opened_at,
+    resolvedAt: row.resolved_at,
+    txHash: row.tx_hash
   };
 }
 

@@ -50,6 +50,19 @@ export function openDb() {
       updated_at INTEGER NOT NULL DEFAULT 0
     );
 
+    CREATE TABLE IF NOT EXISTS disputes (
+      purchase_id TEXT PRIMARY KEY,
+      buyer TEXT NOT NULL,
+      pay_token TEXT,
+      amount TEXT,
+      status TEXT DEFAULT 'open',
+      opened_at INTEGER,
+      resolved_at INTEGER,
+      tx_hash TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_disputes_buyer ON disputes(buyer);
+    CREATE INDEX IF NOT EXISTS idx_disputes_status ON disputes(status);
+
     -- issued_nonces_v2 includes chain_id; old issued_nonces (without chain_id) is migrated below
     CREATE TABLE IF NOT EXISTS issued_nonces_v2 (
       chain_id INTEGER NOT NULL,
