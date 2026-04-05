@@ -16,7 +16,12 @@ export function loadConfig() {
     itemsActionAddress: import.meta.env.VITE_ITEMS_ACTION_ADDRESS ?? defaults.itemsActionAddress ?? "",
     erc721ActionAddress: import.meta.env.VITE_ERC721_ACTION_ADDRESS ?? defaults.erc721ActionAddress ?? "",
     defaultTemplateId: import.meta.env.VITE_ERC721_DEFAULT_TEMPLATE_ID ?? defaults.defaultTemplateId ?? "",
-    ipfsGateway: import.meta.env.VITE_IPFS_GATEWAY ?? defaults.ipfsGateway ?? ""
+    ipfsGateway: import.meta.env.VITE_IPFS_GATEWAY ?? defaults.ipfsGateway ?? "",
+    xpntsContract: import.meta.env.VITE_XPNTS_CONTRACT ?? "",
+    xpntsRewardAmount: import.meta.env.VITE_XPNTS_REWARD_AMOUNT ?? "0",
+    eligibilityPermitValidator: import.meta.env.VITE_ELIGIBILITY_PERMIT_VALIDATOR ?? "",
+    disputeEscrowAddress: import.meta.env.VITE_DISPUTE_ESCROW_ADDRESS ?? "",
+    disputeWindowSeconds: import.meta.env.VITE_DISPUTE_WINDOW_SECONDS ?? "604800"
   };
 
   const cfg = {
@@ -31,7 +36,12 @@ export function loadConfig() {
     itemsActionAddress: raw.itemsActionAddress ?? "",
     erc721ActionAddress: raw.erc721ActionAddress ?? "",
     defaultTemplateId: raw.defaultTemplateId ?? "",
-    ipfsGateway: raw.ipfsGateway ?? ""
+    ipfsGateway: raw.ipfsGateway ?? "",
+    xpntsContract: raw.xpntsContract ?? "",
+    xpntsRewardAmount: raw.xpntsRewardAmount ?? "0",
+    eligibilityPermitValidator: raw.eligibilityPermitValidator ?? "",
+    disputeEscrowAddress: raw.disputeEscrowAddress ?? "",
+    disputeWindowSeconds: raw.disputeWindowSeconds ? Number(raw.disputeWindowSeconds) : 604800
   };
 
   return cfg;

@@ -1,4 +1,4 @@
-import { createPublicClient, createWalletClient, custom, decodeEventLog, getAddress, http, isAddress, parseAbiItem, parseEther, encodeAbiParameters } from "viem";
+import { createPublicClient, createWalletClient, custom, decodeEventLog, getAddress, http, isAddress, keccak256, encodePacked, parseAbiItem, parseEther, encodeAbiParameters } from "viem";
 
 import { loadConfig } from "./config.js";
 import {
@@ -6,8 +6,10 @@ import {
   decodeShopRolesMask,
   getDefaultShopRoleConfig,
   erc20Abi,
+  xpntsAbi,
   myShopItemsAbi,
-  myShopsAbi
+  myShopsAbi,
+  disputeEscrowAbi
 } from "./contracts.js";
 
 // F7: mobile-responsive base styles
@@ -82,7 +84,12 @@ function getRuntimeConfig() {
     workerApiUrl: stored.workerApiUrl || envCfg.workerApiUrl || "",
     apntsSaleUrl: stored.apntsSaleUrl || envCfg.apntsSaleUrl || "",
     gtokenSaleUrl: stored.gtokenSaleUrl || envCfg.gtokenSaleUrl || "",
-    ipfsGateway: stored.ipfsGateway || envCfg.ipfsGateway || ""
+    ipfsGateway: stored.ipfsGateway || envCfg.ipfsGateway || "",
+    xpntsContract: stored.xpntsContract || envCfg.xpntsContract || "",
+    xpntsRewardAmount: stored.xpntsRewardAmount || envCfg.xpntsRewardAmount || "0",
+    eligibilityPermitValidator: stored.eligibilityPermitValidator || envCfg.eligibilityPermitValidator || "",
+    disputeEscrowAddress: stored.disputeEscrowAddress || envCfg.disputeEscrowAddress || "",
+    disputeWindowSeconds: stored.disputeWindowSeconds || envCfg.disputeWindowSeconds || 604800
   };
 }
 
@@ -2010,7 +2017,12 @@ function applyConfigFromInputs() {
     workerApiUrl: val("workerApiUrl") || "",
     ipfsGateway: val("ipfsGateway") || "",
     apntsSaleUrl: val("apntsSaleUrl") || "",
-    gtokenSaleUrl: val("gtokenSaleUrl") || ""
+    gtokenSaleUrl: val("gtokenSaleUrl") || "",
+    xpntsContract: val("xpntsContract") || "",
+    xpntsRewardAmount: val("xpntsRewardAmount") || "0",
+    eligibilityPermitValidator: val("eligibilityPermitValidator") || "",
+    disputeEscrowAddress: val("disputeEscrowAddress") || "",
+    disputeWindowSeconds: val("disputeWindowSeconds") ? Number(val("disputeWindowSeconds")) : 604800
   };
   runtimeCfg = next;
   saveStoredConfig(next);
@@ -2721,6 +2733,11 @@ function buildPurchaseProof(p) {
   };
 }
 
+// M4: Compute purchaseId for DisputeEscrow — keccak256(abi.encodePacked(itemId, tokenId, buyer))
+function computePurchaseId(itemId, tokenId, buyer) {
+  return keccak256(encodePacked(["uint256", "uint256", "address"], [BigInt(itemId), BigInt(tokenId), buyer]));
+}
+
 function renderPurchasesList(container, { purchases, emptyText }) {
   container.innerHTML = "";
   if (!Array.isArray(purchases) || purchases.length === 0) {
@@ -2933,10 +2950,51 @@ async function buyWithStateMachine({ itemId, quantity, recipient, extraData, eth
       // non-fatal
     }
     setPurchaseState({ state: "success", tokenId });
+
+    // F14: Show xPNTs reward toast if configured
+    _showXpntsToast();
   } catch (e) {
     const errMsg = getErrorText(e);
     setPurchaseState({ state: "error", error: errMsg });
     throw e;
+  }
+}
+
+function _showXpntsToast() {
+  const amount = Number(runtimeCfg.xpntsRewardAmount || "0");
+  if (!amount || amount <= 0) return;
+  const toast = document.createElement("div");
+  toast.style.cssText = "position:fixed;bottom:24px;right:24px;background:#16a34a;color:#fff;padding:12px 20px;border-radius:8px;font-weight:600;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,.25);";
+  toast.textContent = `You earned ${amount} xPNTs!`;
+  document.body.appendChild(toast);
+  setTimeout(() => { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 4000);
+}
+
+// F15: Fetch EligibilityPermit from worker if item uses permit-based eligibility validator
+async function _fetchEligibilityPermitExtraData({ itemId, shopId, buyerAddress }) {
+  const validatorAddr = String(runtimeCfg.eligibilityPermitValidator || "").trim();
+  if (!validatorAddr || !isAddress(validatorAddr)) return null;
+
+  const workerUrl = String(runtimeCfg.workerUrl || "").trim();
+  if (!workerUrl) return null;
+
+  try {
+    const base = workerUrl.replace(/\/+$/, "");
+    const res = await fetch(`${base}/eligibility-permit`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ itemId: String(itemId), buyerAddress, shopId: String(shopId) })
+    });
+    if (!res.ok) {
+      console.warn(`[eligibilityPermit] worker returned HTTP ${res.status}`);
+      return null;
+    }
+    const json = await res.json();
+    if (!json?.ok || !json?.permit?.signature) return null;
+    return json.permit.signature;
+  } catch (e) {
+    console.warn("[eligibilityPermit] fetch failed:", e?.message ?? e);
+    return null;
   }
 }
 
@@ -3010,6 +3068,116 @@ async function renderMyHistoryPage(container) {
       ])
     );
     listBox.appendChild(row);
+
+    // M4 F17/F18: Dispute status + F16 Open Dispute button
+    const disputeEscrowAddress = runtimeCfg.disputeEscrowAddress;
+    if (disputeEscrowAddress && p.firstTokenId != null && connectedAddress) {
+      const disputeRow = el("div", { style: "margin-top: 6px;" });
+      row.appendChild(disputeRow);
+
+      // Compute purchaseId
+      let purchaseId = null;
+      try {
+        purchaseId = computePurchaseId(p.itemId, p.firstTokenId, connectedAddress);
+      } catch {
+        // skip if unable to compute
+      }
+
+      if (purchaseId) {
+        // F17: Fetch dispute status from worker asynchronously
+        (async () => {
+          try {
+            const workerApiBase = normalizeBaseUrl(runtimeCfg.workerApiUrl);
+            let disputeStatus = null;
+            if (workerApiBase) {
+              try {
+                const url = new URL(`/disputes/${purchaseId}`, workerApiBase);
+                const res = await fetch(url.toString());
+                if (res.ok) {
+                  const json = await res.json();
+                  if (json?.ok) disputeStatus = json;
+                }
+                // 404 = no dispute, that's fine
+              } catch {
+                // worker unreachable — skip
+              }
+            }
+
+            // F17: Render dispute status badge
+            if (disputeStatus) {
+              const { status, openedAt, resolvedAt, txHash: disputeTxHash } = disputeStatus;
+              let badgeColor = "#9ca3af"; // grey = no dispute
+              let badgeText = "";
+              if (status === "open") { badgeColor = "#f97316"; badgeText = "Dispute: pending jury"; }
+              else if (status === "resolved_buyer") { badgeColor = "#22c55e"; badgeText = "Dispute resolved: You won — funds returned"; }
+              else if (status === "resolved_shop") { badgeColor = "#ef4444"; badgeText = "Dispute resolved: Shop retained funds"; }
+              else if (status === "cancelled") { badgeColor = "#9ca3af"; badgeText = "Dispute cancelled"; }
+
+              const badge = el("span", {
+                text: badgeText,
+                style: `background:${badgeColor}; color:#fff; border-radius:4px; padding:2px 7px; font-size:0.85em; margin-right:6px;`
+              });
+              disputeRow.appendChild(badge);
+
+              // F18: Link to dispute tx
+              if (disputeTxHash && explorerBase) {
+                disputeRow.appendChild(
+                  el("a", { href: `${explorerBase}/tx/${disputeTxHash}`, target: "_blank", rel: "noreferrer", text: "dispute tx", style: "font-size:0.85em; margin-right:6px;" })
+                );
+              }
+            }
+
+            // F16: Show "Open Dispute" button if within window and no open dispute
+            const canDispute = !disputeStatus || (disputeStatus.status !== "open" && disputeStatus.status !== "resolved_buyer" && disputeStatus.status !== "resolved_shop");
+            const windowSec = Number(runtimeCfg.disputeWindowSeconds ?? 604800);
+            const purchaseTimestamp = p.timestamp ? Number(p.timestamp) : null;
+            const nowSec = Math.floor(Date.now() / 1000);
+            const withinWindow = purchaseTimestamp == null || (nowSec - purchaseTimestamp) < windowSec;
+
+            if (canDispute && withinWindow) {
+              const btnDispute = el("button", {
+                text: "Open Dispute",
+                style: "font-size:0.85em; margin-left:4px; background:#f97316; color:#fff; border:none; border-radius:4px; padding:2px 8px; cursor:pointer;",
+                onclick: async () => {
+                  try {
+                    if (!walletClient) throw new Error("Connect wallet first");
+                    const payToken = item?.payToken || "0x0000000000000000000000000000000000000000";
+                    const defaultAmount = item?.unitPrice ? String(item.unitPrice) : "0";
+                    const amountInput = prompt(`Dispute amount (in token units, default: ${defaultAmount}):`, defaultAmount);
+                    if (amountInput === null) return; // cancelled
+                    const amount = BigInt(amountInput || defaultAmount);
+
+                    btnDispute.disabled = true;
+                    btnDispute.textContent = "Submitting...";
+
+                    const escrowAddr = getAddress(disputeEscrowAddress);
+                    const hash = await walletClient.writeContract({
+                      address: escrowAddr,
+                      abi: disputeEscrowAbi,
+                      functionName: "openDispute",
+                      args: [purchaseId, payToken, amount],
+                      account: getAddress(connectedAddress),
+                      chain
+                    });
+                    btnDispute.textContent = `Pending: ${shortHex(hash)}`;
+                    await publicClient.waitForTransactionReceipt({ hash });
+                    btnDispute.textContent = "Dispute opened!";
+                    btnDispute.style.background = "#22c55e";
+                  } catch (e) {
+                    btnDispute.disabled = false;
+                    btnDispute.textContent = "Open Dispute";
+                    alert(`Failed to open dispute: ${getErrorText(e)}`);
+                  }
+                }
+              });
+              disputeRow.appendChild(btnDispute);
+            }
+          } catch {
+            // non-fatal: dispute UI failure doesn't break the page
+          }
+        })();
+      }
+    }
 
     // Async populate item name from IPFS metadata
     if (item && item.tokenURI) {
@@ -3217,13 +3385,35 @@ async function renderItemDetail(container, itemId) {
         return;
       }
       setPurchaseState({ state: "idle" });
-      buyWithStateMachine({
-        itemId: BigInt(itemId),
-        quantity: 1n,
-        recipient: getAddress(connectedAddress),
-        extraData: "0x",
-        ethValue: ""
-      }).catch((e) => {
+
+      // F15: check if this item uses a permit-based eligibility validator
+      const configuredValidator = String(runtimeCfg.eligibilityPermitValidator || "").trim().toLowerCase();
+      const itemAction = String(item.action || "").trim().toLowerCase();
+      const usesEligibilityPermit = configuredValidator && configuredValidator !== "0x" &&
+        itemAction === configuredValidator;
+
+      (async () => {
+        let extraData = "0x";
+        if (usesEligibilityPermit) {
+          try {
+            const sig = await _fetchEligibilityPermitExtraData({
+              itemId: String(itemId),
+              shopId: String(item.shopId),
+              buyerAddress: connectedAddress
+            });
+            if (sig) extraData = sig;
+          } catch {
+            // non-fatal: proceed with empty extraData
+          }
+        }
+        await buyWithStateMachine({
+          itemId: BigInt(itemId),
+          quantity: 1n,
+          recipient: getAddress(connectedAddress),
+          extraData,
+          ethValue: ""
+        });
+      })().catch((e) => {
         showTxError(e);
       });
     }
@@ -4079,6 +4269,15 @@ async function renderConfig(container) {
       inputRow("IPFS_GATEWAY (eg. https://gw.example.com)", "ipfsGateway"),
       inputRow("APNTS_SALE_URL", "apntsSaleUrl"),
       inputRow("GTOKEN_SALE_URL", "gtokenSaleUrl"),
+      el("hr"),
+      el("div", { text: "xPNTs (Loyalty)" }),
+      inputRow("XPNTS_CONTRACT (xPNTs ERC20 address)", "xpntsContract"),
+      inputRow("XPNTS_REWARD_AMOUNT (per purchase)", "xpntsRewardAmount"),
+      inputRow("ELIGIBILITY_PERMIT_VALIDATOR (address)", "eligibilityPermitValidator"),
+      el("hr"),
+      el("div", { text: "Dispute (M4)" }),
+      inputRow("DISPUTE_ESCROW_ADDRESS", "disputeEscrowAddress"),
+      inputRow("DISPUTE_WINDOW_SECONDS (default 604800 = 7d)", "disputeWindowSeconds"),
       el("button", {
         text: "Fill from env",
         onclick: () => {
@@ -4094,6 +4293,11 @@ async function renderConfig(container) {
           document.getElementById("ipfsGateway").value = envCfg.ipfsGateway || "";
           document.getElementById("apntsSaleUrl").value = envCfg.apntsSaleUrl || "";
           document.getElementById("gtokenSaleUrl").value = envCfg.gtokenSaleUrl || "";
+          document.getElementById("xpntsContract").value = envCfg.xpntsContract || "";
+          document.getElementById("xpntsRewardAmount").value = envCfg.xpntsRewardAmount || "0";
+          document.getElementById("eligibilityPermitValidator").value = envCfg.eligibilityPermitValidator || "";
+          document.getElementById("disputeEscrowAddress").value = envCfg.disputeEscrowAddress || "";
+          document.getElementById("disputeWindowSeconds").value = envCfg.disputeWindowSeconds ? String(envCfg.disputeWindowSeconds) : "604800";
         }
       }),
       el("button", {
@@ -4111,6 +4315,11 @@ async function renderConfig(container) {
           document.getElementById("ipfsGateway").value = runtimeCfg.ipfsGateway || "";
           document.getElementById("apntsSaleUrl").value = runtimeCfg.apntsSaleUrl || "";
           document.getElementById("gtokenSaleUrl").value = runtimeCfg.gtokenSaleUrl || "";
+          document.getElementById("xpntsContract").value = runtimeCfg.xpntsContract || "";
+          document.getElementById("xpntsRewardAmount").value = runtimeCfg.xpntsRewardAmount || "0";
+          document.getElementById("eligibilityPermitValidator").value = runtimeCfg.eligibilityPermitValidator || "";
+          document.getElementById("disputeEscrowAddress").value = runtimeCfg.disputeEscrowAddress || "";
+          document.getElementById("disputeWindowSeconds").value = runtimeCfg.disputeWindowSeconds ? String(runtimeCfg.disputeWindowSeconds) : "604800";
         }
       }),
       el("button", { text: "Load from Worker /config", onclick: () => loadConfigFromWorker().catch(showTxError) }),
@@ -4135,6 +4344,11 @@ async function renderConfig(container) {
   document.getElementById("ipfsGateway").value = runtimeCfg.ipfsGateway || "";
   document.getElementById("apntsSaleUrl").value = runtimeCfg.apntsSaleUrl || "";
   document.getElementById("gtokenSaleUrl").value = runtimeCfg.gtokenSaleUrl || "";
+  document.getElementById("xpntsContract").value = runtimeCfg.xpntsContract || "";
+  document.getElementById("xpntsRewardAmount").value = runtimeCfg.xpntsRewardAmount || "0";
+  document.getElementById("eligibilityPermitValidator").value = runtimeCfg.eligibilityPermitValidator || "";
+  document.getElementById("disputeEscrowAddress").value = runtimeCfg.disputeEscrowAddress || "";
+  document.getElementById("disputeWindowSeconds").value = runtimeCfg.disputeWindowSeconds ? String(runtimeCfg.disputeWindowSeconds) : "604800";
 }
 
 async function renderRolesPage(container, query = {}) {
