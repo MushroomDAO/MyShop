@@ -59,6 +59,19 @@ export function openDb() {
       issued_at INTEGER NOT NULL,
       PRIMARY KEY (chain_id, item_id, buyer, nonce)
     );
+
+    -- W6: webhook retry queue (exponential backoff, survives restarts)
+    CREATE TABLE IF NOT EXISTS webhook_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      url TEXT NOT NULL,
+      payload TEXT NOT NULL,       -- JSON string of the event
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at INTEGER NOT NULL DEFAULT 0,  -- Unix seconds
+      last_error TEXT,
+      delivered_at INTEGER         -- NULL = pending; -1 = permanently failed
+    );
+    CREATE INDEX IF NOT EXISTS idx_webhook_queue_pending
+      ON webhook_queue(next_attempt_at) WHERE delivered_at IS NULL;
   `);
 
   // Migration: copy old issued_nonces (no chain_id) into issued_nonces_v2 with chain_id=0, then drop

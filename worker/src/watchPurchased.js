@@ -2,6 +2,7 @@ import { decodeEventLog, getAddress, parseAbiItem } from "viem";
 import { http, createPublicClient } from "viem";
 
 import { myShopItemsAbi, myShopsAbi } from "./abi.js";
+import { enqueueWebhook } from "./webhookQueue.js";
 
 const purchasedEvent = parseAbiItem(
   "event Purchased(uint256 indexed itemId,uint256 indexed shopId,address indexed buyer,address recipient,uint256 quantity,address payToken,uint256 payAmount,uint256 platformFeeAmount,bytes32 serialHash,uint256 firstTokenId)"
@@ -78,11 +79,7 @@ export async function watchPurchased({
         };
 
         if (webhookUrl) {
-          await fetch(webhookUrl, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(fullPayload)
-          });
+          enqueueWebhook(webhookUrl, fullPayload);
         }
 
         if (telegram) {

@@ -7,6 +7,7 @@ import { getDeploymentDefaults } from "../../frontend/src/deployments.js";
 import { startApiServer } from "./apiServer.js";
 import { startPermitServer } from "./permitServer.js";
 import { watchPurchased } from "./watchPurchased.js";
+import { processWebhookQueue } from "./webhookQueue.js";
 
 const mode = optionalEnv("MODE", "both");
 
@@ -105,6 +106,12 @@ if (enableApi) {
       process.exit(1);
     });
 }
+
+// W6: Process webhook retry queue every 30 seconds
+setInterval(
+  () => processWebhookQueue().catch((e) => log.error("webhook queue error", { error: e.message })),
+  30_000
+);
 
 if (!["watch", "permit", "both"].includes(mode)) {
   throw new Error("MODE must be watch|permit|both");

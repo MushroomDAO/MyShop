@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "node src/index.js",
-    "check": "node --check src/index.js && node --check src/watchPurchased.js && node --check src/permitServer.js && node --check src/apiServer.js",
+    "check": "node --check src/index.js && node --check src/watchPurchased.js && node --check src/permitServer.js && node --check src/apiServer.js && node --check src/db.js && node --check src/logger.js && node --check src/webhookQueue.js",
     "smoke:all": "tsx src/smoke/allFeatures.ts",
     "test": "pnpm smoke:all",
     "regression:worker": "pnpm check && pnpm test",
@@ -19,5 +19,11 @@
     "@types/node": "^20.11.0",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild"
+    ]
   }
 }
