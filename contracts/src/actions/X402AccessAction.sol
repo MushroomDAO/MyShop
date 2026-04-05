@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.20;
+pragma solidity 0.8.33;
 
 interface IERC721Mintable {
     function mint(address to, string calldata uri) external returns (uint256);
