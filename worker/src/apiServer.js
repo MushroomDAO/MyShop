@@ -107,7 +107,7 @@ export async function startApiServer({ rpcUrl, chain, itemsAddress, port }) {
         res.writeHead(204, {
           "access-control-allow-origin": "*",
           "access-control-allow-methods": "GET,POST,OPTIONS",
-          "access-control-allow-headers": "content-type"
+          "access-control-allow-headers": "content-type,x-api-key"
         });
         res.end();
         return;
@@ -506,6 +506,45 @@ export async function startApiServer({ rpcUrl, chain, itemsAddress, port }) {
           }
           return _json(res, 200, { ok: true, count: rows.length, disputes: rows.map(formatDispute) });
         }
+      }
+
+      // W15: x402 access verification — GET /x402/verify?address=0x...&resource=<uri>&contract=0x...
+      if (url.pathname === "/x402/verify") {
+        // Optional API-key auth (X402_API_KEY env; if unset, no auth required for dev)
+        const x402ApiKey = process.env.X402_API_KEY;
+        if (x402ApiKey) {
+          const reqKey = req.headers["x-api-key"];
+          if (reqKey !== x402ApiKey) {
+            return _json(res, 401, { ok: false, error: "unauthorized" });
+          }
+        }
+
+        const addressParam = url.searchParams.get("address");
+        const resource = url.searchParams.get("resource") ?? "";
+        const contractParam = url.searchParams.get("contract");
+
+        if (!addressParam || !contractParam) {
+          return _json(res, 400, { ok: false, error: "address and contract are required" });
+        }
+
+        const holderAddress = getAddress(addressParam);
+        const nftContract = getAddress(contractParam);
+
+        // Simple balanceOf check — no signing needed
+        const balanceRaw = await client.readContract({
+          address: nftContract,
+          abi: [{ name: "balanceOf", type: "function", stateMutability: "view", inputs: [{ name: "owner", type: "address" }], outputs: [{ name: "", type: "uint256" }] }],
+          functionName: "balanceOf",
+          args: [holderAddress]
+        });
+        const balance = Number(BigInt(balanceRaw));
+        return _json(res, 200, {
+          ok: true,
+          eligible: balance > 0,
+          balance,
+          resource,
+          address: holderAddress
+        });
       }
 
       return _json(res, 404, { ok: false, error: "not_found" });
