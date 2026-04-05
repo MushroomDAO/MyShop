@@ -112,6 +112,94 @@ contract SubscriptionActionTest is Test {
         assertEq(nft.nextTokenId(), 1);
     }
 
+    // -----------------------------------------------------------------------
+    // test_subscription_expiresAt_correct — expiresAt = block.timestamp + duration
+    // -----------------------------------------------------------------------
+
+    function test_subscription_expiresAt_correct() external {
+        uint256 duration = 90 days;
+        uint256 ts = 2_000_000_000;
+        vm.warp(ts);
+
+        uint256 expectedExpiry = ts + duration;
+
+        vm.expectEmit(true, true, true, true);
+        emit SubscriptionAction.SubscriptionGranted(recipient, address(nft), 1, expectedExpiry);
+
+        action.execute(buyer, recipient, 0, 0, 1, _actionData(duration), "");
+
+        assertEq(nft.ownerOf(1), recipient);
+    }
+
+    // -----------------------------------------------------------------------
+    // test_subscription_batchMint — quantity=3, all same expiresAt, 3 events
+    // -----------------------------------------------------------------------
+
+    function test_subscription_batchMint() external {
+        uint256 duration = 30 days;
+        uint256 expectedExpiresAt = block.timestamp + duration;
+
+        vm.expectEmit(true, true, true, true);
+        emit SubscriptionAction.SubscriptionGranted(recipient, address(nft), 1, expectedExpiresAt);
+        vm.expectEmit(true, true, true, true);
+        emit SubscriptionAction.SubscriptionGranted(recipient, address(nft), 2, expectedExpiresAt);
+        vm.expectEmit(true, true, true, true);
+        emit SubscriptionAction.SubscriptionGranted(recipient, address(nft), 3, expectedExpiresAt);
+
+        action.execute(buyer, recipient, 0, 0, 3, _actionData(duration), "");
+
+        assertEq(nft.nextTokenId(), 3, "three tokens minted");
+        assertEq(nft.ownerOf(1), recipient);
+        assertEq(nft.ownerOf(2), recipient);
+        assertEq(nft.ownerOf(3), recipient);
+        // All have the same tokenURI (same expiresAt)
+        assertEq(nft.tokenURI(1), nft.tokenURI(2));
+        assertEq(nft.tokenURI(2), nft.tokenURI(3));
+    }
+
+    // -----------------------------------------------------------------------
+    // test_subscription_zeroDuration — durationSeconds=0, expiresAt=block.timestamp
+    // -----------------------------------------------------------------------
+
+    function test_subscription_zeroDuration() external {
+        uint256 ts = 1_500_000_000;
+        vm.warp(ts);
+
+        uint256 expectedExpiresAt = ts; // 0 duration → expires at current block
+
+        vm.expectEmit(true, true, true, true);
+        emit SubscriptionAction.SubscriptionGranted(recipient, address(nft), 1, expectedExpiresAt);
+
+        action.execute(buyer, recipient, 0, 0, 1, _actionData(0), "");
+
+        assertEq(nft.ownerOf(1), recipient);
+    }
+
+    // -----------------------------------------------------------------------
+    // test_subscription_tokenUriContainsExpiry — tokenURI encodes expiresAt
+    // -----------------------------------------------------------------------
+
+    function test_subscription_tokenUriContainsExpiry() external {
+        uint256 duration = 14 days;
+        uint256 ts = 1_800_000_000;
+        vm.warp(ts);
+        uint256 expiresAt = ts + duration;
+
+        action.execute(buyer, recipient, 0, 0, 1, _actionData(duration), "");
+
+        string memory uri = nft.tokenURI(1);
+        // The tokenURI must include the numeric expiresAt value
+        assertTrue(
+            _contains(uri, _uintToString(expiresAt)),
+            "tokenURI should contain the expiresAt timestamp"
+        );
+        // Also confirm it uses the expected data URI prefix
+        assertTrue(
+            _contains(uri, "expiresAt"),
+            "tokenURI should contain the 'expiresAt' key"
+        );
+    }
+
     // --- helpers ---
 
     function _uintToString(uint256 value) internal pure returns (string memory) {
