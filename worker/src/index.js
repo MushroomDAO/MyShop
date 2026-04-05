@@ -7,6 +7,7 @@ import { getDeploymentDefaults } from "../../frontend/src/deployments.js";
 import { startApiServer } from "./apiServer.js";
 import { startPermitServer } from "./permitServer.js";
 import { watchPurchased } from "./watchPurchased.js";
+import { getExpiringSubscriptions, markNotified } from "./subscriptionTracker.js";
 
 const mode = optionalEnv("MODE", "both");
 
@@ -114,6 +115,54 @@ if (enableApi) {
 if (!["watch", "permit", "both"].includes(mode)) {
   throw new Error("MODE must be watch|permit|both");
 }
+
+// W16: Daily subscription expiry check — runs every 24 hours
+// Logs subscriptions expiring within 3 days; sends Telegram reminder if configured.
+const SUBSCRIPTION_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const SUBSCRIPTION_EXPIRY_WINDOW_SECONDS = 3 * 24 * 60 * 60; // 3 days
+
+function checkExpiringSubscriptions() {
+  try {
+    const expiring = getExpiringSubscriptions(SUBSCRIPTION_EXPIRY_WINDOW_SECONDS);
+    if (!expiring.length) return;
+
+    log.info("subscriptions expiring soon", { count: expiring.length });
+    for (const sub of expiring) {
+      const expiresDate = new Date(sub.expires_at * 1000).toISOString();
+      log.info("subscription expiring", {
+        subscriber: sub.subscriber,
+        nftContract: sub.nft_contract,
+        tokenId: sub.token_id,
+        expiresAt: expiresDate,
+        itemId: sub.item_id
+      });
+
+      if (telegramBotToken && telegramChatId) {
+        const text =
+          `MyShop Subscription Expiring Soon\n` +
+          `subscriber: ${sub.subscriber}\n` +
+          `nftContract: ${sub.nft_contract}\n` +
+          `tokenId: ${sub.token_id}\n` +
+          `expiresAt: ${expiresDate}\n` +
+          (sub.item_id ? `itemId: ${sub.item_id}\n` : "");
+        const url = `https://api.telegram.org/bot${telegramBotToken}/sendMessage`;
+        fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ chat_id: telegramChatId, text })
+        }).catch((e) => log.error("telegram subscription reminder failed", { error: String(e) }));
+      }
+
+      markNotified(sub.nft_contract, sub.token_id);
+    }
+  } catch (e) {
+    log.error("subscription expiry check failed", { error: String(e) });
+  }
+}
+
+// Run once on startup (non-blocking), then every 24h
+setImmediate(checkExpiringSubscriptions);
+setInterval(checkExpiringSubscriptions, SUBSCRIPTION_CHECK_INTERVAL_MS);
 
 function normalizePrivateKey(value) {
   const hex = value.startsWith("0x") ? value : `0x${value}`;
