@@ -237,4 +237,55 @@ contract MyShopItemsGaslessTest is Test {
         vm.expectRevert(MyShopItems.NonceUsed.selector);
         items.buyGasless(itemId, 1, recipient, eoa, extraData);
     }
+
+    // ----------------------------------------------------------------
+    // test_BuyGasless_PayerNonceConsumption
+    //
+    // DESIGN TRADE-OFF (known limitation):
+    //   buyGasless() accepts an arbitrary `payer` address from msg.sender.
+    //   A malicious relayer/attacker who holds a valid signed SerialPermit
+    //   for a victim (e.g. obtained off-chain) can call buyGasless with
+    //   payer=victim, consuming the victim's nonce and forcing the victim's
+    //   permit to be spent.
+    //
+    //   MITIGATION (off-chain / worker layer):
+    //     - The permit server (worker) only issues SerialPermits to
+    //       trusted relayers identified by allowlist or HMAC session tokens.
+    //     - Permit payloads are single-use and short-lived (deadline << 1 hr).
+    //     - The worker records issued permits and can detect reuse attempts.
+    //   This trade-off is acceptable because on-chain identity binding would
+    //   require msg.sender == payer, defeating the purpose of AA relaying.
+    // ----------------------------------------------------------------
+    function test_BuyGasless_PayerNonceConsumption() external {
+        // Attacker obtains a permit signed for `eoa` (the victim). In practice
+        // this could happen if a relay leaks the signed permit off-chain.
+        uint256 itemId = _addItem(true);
+
+        bytes32 serialHash = keccak256(abi.encodePacked("VICTIM-SERIAL-001"));
+        uint256 deadline = block.timestamp + 1 hours;
+        uint256 nonce = 42; // arbitrary nonce that has not been used yet
+        bytes memory sig = _signSerialPermit(itemId, eoa, serialHash, deadline, nonce);
+        bytes memory extraData = abi.encode(serialHash, deadline, nonce, sig);
+
+        // Attacker is a different address that holds USDC and is not eoa.
+        address attacker = address(0xA77AC4);
+        usdc.mint(attacker, 1_000_000_000);
+        vm.prank(attacker);
+        usdc.approve(address(items), type(uint256).max);
+
+        // Attacker calls buyGasless, setting payer=eoa (the victim).
+        // The call succeeds because the contract only verifies the permit's
+        // signature against the stated payer — it does NOT require msg.sender == payer.
+        vm.prank(attacker);
+        items.buyGasless(itemId, 1, attacker, eoa, extraData);
+
+        // The victim's nonce is now consumed even though the victim did not call.
+        assertTrue(items.usedNonces(eoa, nonce), "victim nonce consumed by attacker call");
+        assertFalse(items.usedNonces(attacker, nonce), "attacker nonce unaffected");
+
+        // A subsequent attempt to use the same permit (e.g. by the real relayer) fails.
+        vm.prank(aaWallet);
+        vm.expectRevert(MyShopItems.NonceUsed.selector);
+        items.buyGasless(itemId, 1, recipient, eoa, extraData);
+    }
 }
