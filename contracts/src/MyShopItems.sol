@@ -453,6 +453,28 @@ contract MyShopItems {
         payable
         returns (uint256 firstTokenId)
     {
+        return _buy(itemId, quantity, recipient, msg.sender, extraData);
+    }
+
+    /// @notice ERC-4337 compatible buy with explicit payer identity.
+    ///         When called via EntryPoint/Paymaster, msg.sender = AA wallet.
+    ///         `payer` is used for SerialPermit + RiskAllowance verification.
+    ///         If payer == address(0), falls back to msg.sender.
+    function buyGasless(
+        uint256 itemId,
+        uint256 quantity,
+        address recipient,
+        address payer,
+        bytes calldata extraData
+    ) external payable returns (uint256 firstTokenId) {
+        address effectivePayer = payer == address(0) ? msg.sender : payer;
+        return _buy(itemId, quantity, recipient, effectivePayer, extraData);
+    }
+
+    function _buy(uint256 itemId, uint256 quantity, address recipient, address buyer, bytes calldata extraData)
+        internal
+        returns (uint256 firstTokenId)
+    {
         require(_buyLock == 1, "reentrant");
         _buyLock = 2;
         if (quantity == 0) revert InvalidPayment();
@@ -483,7 +505,7 @@ contract MyShopItems {
         // C10: eligibility validator check (0 = anyone can buy)
         if (item.eligibilityValidator != address(0)) {
             bool eligible = IEligibilityValidator(item.eligibilityValidator).checkEligibility(
-                msg.sender, recipient, itemId, item.shopId, quantity,
+                buyer, recipient, itemId, item.shopId, quantity,
                 itemEligibilityData[itemId], extraData
             );
             if (!eligible) revert NotEligible();
@@ -491,7 +513,7 @@ contract MyShopItems {
 
         bytes32 serialHash = bytes32(0);
         if (item.requiresSerial) {
-            serialHash = _verifySerial(itemId, msg.sender, extraData);
+            serialHash = _verifySerial(itemId, buyer, extraData);
         }
 
         // CEI: update state before external calls to prevent reentrancy
@@ -510,12 +532,12 @@ contract MyShopItems {
 
         // C11: record purchase timestamp for dispute window (DisputeModule M4)
         // Include buyer+timestamp+firstTokenId to avoid collision when NFT contract reuses IDs
-        bytes32 purchaseId = keccak256(abi.encode(itemId, firstTokenId, msg.sender, block.timestamp));
+        bytes32 purchaseId = keccak256(abi.encode(itemId, firstTokenId, buyer, block.timestamp));
         purchaseTimestamps[purchaseId] = block.timestamp;
 
         {
             PurchaseContext memory ctx = PurchaseContext({
-                buyer: msg.sender, recipient: recipient, itemId: itemId, shopId: item.shopId, quantity: quantity
+                buyer: buyer, recipient: recipient, itemId: itemId, shopId: item.shopId, quantity: quantity
             });
             _executeAction(item.action, ctx, item.actionData, extraData);
         }
@@ -523,7 +545,7 @@ contract MyShopItems {
         PurchaseRecord memory rec = PurchaseRecord({
             itemId: itemId,
             shopId: item.shopId,
-            buyer: msg.sender,
+            buyer: buyer,
             recipient: recipient,
             quantity: quantity,
             payToken: item.payToken,
