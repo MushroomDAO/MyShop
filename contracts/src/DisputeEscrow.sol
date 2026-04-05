@@ -24,7 +24,8 @@ contract DisputeEscrow is IJuryCallback {
         DisputeStatus status;
     }
 
-    enum DisputeStatus { Open, Resolved, Cancelled }
+    // None=0 is the zero-value sentinel so uninitialized disputes are NOT mistaken for Open.
+    enum DisputeStatus { None, Open, Resolved, Cancelled }
 
     mapping(bytes32 => Dispute) public disputes; // disputeId => Dispute
     mapping(bytes32 => bool) public purchaseDisputed; // purchaseId => already disputed
@@ -41,7 +42,9 @@ contract DisputeEscrow is IJuryCallback {
     error DisputeAlreadyOpen();
     error PurchaseNotInDisputeWindow();
     error DisputeNotOpen();
+    error DisputeNotFound();
     error InvalidAddress();
+    error ZeroAmount();
     error EvidenceTooLarge();
     error TransferFailed();
 
@@ -76,6 +79,7 @@ contract DisputeEscrow is IJuryCallback {
         address shopTreasury,
         string calldata evidence
     ) external returns (bytes32 disputeId) {
+        if (amount == 0) revert ZeroAmount();
         if (purchaseDisputed[purchaseId]) revert DisputeAlreadyOpen();
         if (!itemsContract.isInDisputeWindow(purchaseId)) revert PurchaseNotInDisputeWindow();
         if (bytes(evidence).length > MAX_EVIDENCE_SIZE) revert EvidenceTooLarge();
@@ -107,6 +111,8 @@ contract DisputeEscrow is IJuryCallback {
     function onTaskFinalized(bytes32 contextId, uint256, bool buyerWins) external override {
         if (msg.sender != juryContract) revert NotJuryContract();
         Dispute storage d = disputes[contextId];
+        // None is the zero-value; guard against phantom contextIds that never had a dispute opened
+        if (d.status == DisputeStatus.None) revert DisputeNotFound();
         if (d.status != DisputeStatus.Open) revert DisputeNotOpen();
 
         d.status = DisputeStatus.Resolved;
