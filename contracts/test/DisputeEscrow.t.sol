@@ -219,4 +219,73 @@ contract DisputeEscrowTest is Test {
         vm.expectRevert(DisputeEscrow.EvidenceTooLarge.selector);
         escrow.openDispute(PURCHASE_ID, address(usdc), AMOUNT, shopTreasury, string(bigEvidence));
     }
+
+    // -----------------------------------------------------------------------
+    // openDispute — revert on zero amount
+    // -----------------------------------------------------------------------
+
+    function test_openDispute_reverts_zeroAmount() external {
+        vm.prank(buyer);
+        vm.expectRevert(DisputeEscrow.ZeroAmount.selector);
+        escrow.openDispute(PURCHASE_ID, address(usdc), 0, shopTreasury, EVIDENCE);
+    }
+
+    // -----------------------------------------------------------------------
+    // onTaskFinalized — revert on phantom dispute (contextId never opened)
+    // -----------------------------------------------------------------------
+
+    function test_onTaskFinalized_reverts_phantomDispute() external {
+        bytes32 randomId = keccak256("never-opened-dispute");
+
+        vm.prank(juryAddr);
+        vm.expectRevert(DisputeEscrow.DisputeNotFound.selector);
+        escrow.onTaskFinalized(randomId, 80, true);
+    }
+
+    // -----------------------------------------------------------------------
+    // onTaskFinalized — revert if dispute already resolved
+    // -----------------------------------------------------------------------
+
+    function test_onTaskFinalized_reverts_alreadyResolved() external {
+        vm.prank(buyer);
+        bytes32 disputeId = escrow.openDispute(PURCHASE_ID, address(usdc), AMOUNT, shopTreasury, EVIDENCE);
+
+        // First finalization succeeds
+        vm.prank(juryAddr);
+        escrow.onTaskFinalized(disputeId, 80, true);
+
+        // Second finalization on same disputeId must revert with DisputeNotOpen
+        vm.prank(juryAddr);
+        vm.expectRevert(DisputeEscrow.DisputeNotOpen.selector);
+        escrow.onTaskFinalized(disputeId, 80, true);
+    }
+
+    // -----------------------------------------------------------------------
+    // cancelDispute — non-owner reverts with NotOwner
+    // -----------------------------------------------------------------------
+
+    function test_cancelDispute_reverts_nonOwner() external {
+        vm.prank(buyer);
+        bytes32 disputeId = escrow.openDispute(PURCHASE_ID, address(usdc), AMOUNT, shopTreasury, EVIDENCE);
+
+        vm.prank(address(0xBAD));
+        vm.expectRevert(DisputeEscrow.NotOwner.selector);
+        escrow.cancelDispute(disputeId);
+    }
+
+    // -----------------------------------------------------------------------
+    // cancelDispute — already cancelled reverts with DisputeNotOpen
+    // -----------------------------------------------------------------------
+
+    function test_cancelDispute_reverts_alreadyCancelled() external {
+        vm.prank(buyer);
+        bytes32 disputeId = escrow.openDispute(PURCHASE_ID, address(usdc), AMOUNT, shopTreasury, EVIDENCE);
+
+        // First cancel succeeds
+        escrow.cancelDispute(disputeId);
+
+        // Second cancel must revert because status is now Cancelled (not Open)
+        vm.expectRevert(DisputeEscrow.DisputeNotOpen.selector);
+        escrow.cancelDispute(disputeId);
+    }
 }
