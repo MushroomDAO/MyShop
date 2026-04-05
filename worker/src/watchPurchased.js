@@ -2,6 +2,7 @@ import { decodeEventLog, getAddress, parseAbiItem } from "viem";
 import { http, createPublicClient } from "viem";
 
 import { myShopItemsAbi, myShopsAbi } from "./abi.js";
+import { rewardBuyerXpnts } from "./xpntsReward.js";
 
 const purchasedEvent = parseAbiItem(
   "event Purchased(uint256 indexed itemId,uint256 indexed shopId,address indexed buyer,address recipient,uint256 quantity,address payToken,uint256 payAmount,uint256 platformFeeAmount,bytes32 serialHash,uint256 firstTokenId)"
@@ -16,6 +17,9 @@ export async function watchPurchased({
   webhookUrl,
   telegram
 }) {
+  // capture for use inside the loop
+  const _rpcUrl = rpcUrl;
+  const _chain = chain;
   const client = createPublicClient({
     chain,
     transport: http(rpcUrl)
@@ -94,6 +98,17 @@ export async function watchPurchased({
             JSON.stringify(fullPayload, null, 2) + "\n"
           );
         }
+
+        // W10: non-blocking xPNTs reward — failure must not stop event watching
+        rewardBuyerXpnts({
+          buyer: payload.buyer,
+          purchaseId: payload.txHash,
+          quantity: payload.quantity,
+          chain: _chain,
+          rpcUrl: _rpcUrl
+        }).catch((e) => {
+          console.error(`[watchPurchased] xpntsReward error: ${e?.message ?? e}`);
+        });
       }
     }
 

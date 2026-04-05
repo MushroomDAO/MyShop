@@ -261,7 +261,7 @@ export async function startPermitServer({
         return;
       }
 
-      if (limiter.enabled && (url.pathname === "/serial-permit" || url.pathname === "/risk-allowance")) {
+      if (limiter.enabled && (url.pathname === "/serial-permit" || url.pathname === "/risk-allowance" || url.pathname === "/eligibility-permit")) {
         _rateLimitOrThrow({ req, url, limiter });
       }
 
@@ -411,6 +411,61 @@ export async function startPermitServer({
         });
         stats.okTotal += 1;
         stats.okRiskAllowanceTotal += 1;
+        return;
+      }
+
+      if (url.pathname === "/eligibility-permit") {
+        _requireMethod(req, ["POST"]);
+        if (!walletClients.serial) {
+          throw new HttpError({
+            status: 500,
+            code: "signer_not_configured",
+            message: "SERIAL_SIGNER_PRIVATE_KEY not set"
+          });
+        }
+
+        // Parse JSON body
+        const body = await _readJsonBody(req);
+        const itemId = _getUintFromObj(body, "itemId", { min: 1n });
+        const buyerAddress = _getAddressFromObj(body, "buyerAddress");
+        // shopId is optional — validated for presence but not used in the permit struct
+        if (body.shopId == null || body.shopId === "") {
+          throw new HttpError({
+            status: 400,
+            code: "missing_param",
+            message: "Missing body field: shopId",
+            details: { param: "shopId" }
+          });
+        }
+
+        const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600); // 1 hour from now
+        const nonce = await _resolveNonce(publicClient, itemsAddress, buyerAddress, null);
+
+        const signature = await walletClients.serial.signTypedData({
+          domain: { name: "MyShop", version: "1", chainId: domainChainId, verifyingContract: getAddress(itemsAddress) },
+          types: {
+            EligibilityPermit: [
+              { name: "itemId", type: "uint256" },
+              { name: "buyer", type: "address" },
+              { name: "deadline", type: "uint256" },
+              { name: "nonce", type: "uint256" }
+            ]
+          },
+          primaryType: "EligibilityPermit",
+          message: { itemId, buyer: buyerAddress, deadline, nonce }
+        });
+
+        _json(res, 200, {
+          ok: true,
+          permit: {
+            itemId: itemId.toString(),
+            buyerAddress,
+            deadline: deadline.toString(),
+            nonce: nonce.toString(),
+            signature
+          }
+        });
+        stats.okTotal += 1;
         return;
       }
 
@@ -612,6 +667,53 @@ function _evictIfNeeded(limiter, nowMs) {
     }
   }
   if (oldestKey != null) limiter.buckets.delete(oldestKey);
+}
+
+function _readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      try {
+        const raw = Buffer.concat(chunks).toString("utf8");
+        resolve(raw ? JSON.parse(raw) : {});
+      } catch {
+        reject(new HttpError({ status: 400, code: "invalid_json", message: "Request body is not valid JSON" }));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function _getUintFromObj(obj, key, { min, max } = {}) {
+  const raw = obj?.[key];
+  if (raw == null || raw === "") {
+    throw new HttpError({ status: 400, code: "missing_param", message: `Missing body field: ${key}`, details: { param: key } });
+  }
+  const str = String(raw);
+  if (!/^\d+$/.test(str)) {
+    throw new HttpError({ status: 400, code: "invalid_param", message: `Invalid uint body field: ${key}`, details: { param: key, value: str } });
+  }
+  const value = BigInt(str);
+  if (min != null && value < min) {
+    throw new HttpError({ status: 400, code: "invalid_param", message: `Param out of range: ${key}`, details: { param: key, value: str, min: min.toString() } });
+  }
+  if (max != null && value > max) {
+    throw new HttpError({ status: 400, code: "invalid_param", message: `Param out of range: ${key}`, details: { param: key, value: str, max: max.toString() } });
+  }
+  return value;
+}
+
+function _getAddressFromObj(obj, key) {
+  const raw = obj?.[key];
+  if (raw == null || raw === "") {
+    throw new HttpError({ status: 400, code: "missing_param", message: `Missing body field: ${key}`, details: { param: key } });
+  }
+  try {
+    return getAddress(String(raw));
+  } catch {
+    throw new HttpError({ status: 400, code: "invalid_param", message: `Invalid address body field: ${key}`, details: { param: key, value: raw } });
+  }
 }
 
 async function _resolveNonce(publicClient, itemsAddress, user, nonceParam) {
