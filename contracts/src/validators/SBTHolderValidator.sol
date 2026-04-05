@@ -19,8 +19,9 @@ contract SBTHolderValidator is IEligibilityValidator {
         bytes calldata validatorData,
         bytes calldata  // extraData — unused
     ) external view override returns (bool eligible) {
+        if (validatorData.length < 64) return false; // malformed data → fail closed
         (address nftContract, uint256 minBalance) = abi.decode(validatorData, (address, uint256));
-        if (nftContract == address(0)) return true; // misconfigured = open
+        if (nftContract == address(0)) return false; // misconfigured → fail closed (not open)
         uint256 bal = IERC721Balance(nftContract).balanceOf(buyer);
         return bal >= minBalance;
     }

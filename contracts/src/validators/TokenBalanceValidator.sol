@@ -16,8 +16,9 @@ contract TokenBalanceValidator is IEligibilityValidator {
         bytes calldata validatorData,
         bytes calldata
     ) external view override returns (bool eligible) {
+        if (validatorData.length < 64) return false; // malformed data → fail closed
         (address token, uint256 minAmount) = abi.decode(validatorData, (address, uint256));
-        if (token == address(0)) return true;
+        if (token == address(0)) return false; // misconfigured → fail closed
         return IERC20(token).balanceOf(buyer) >= minAmount;
     }
 }

@@ -2,7 +2,7 @@
 // Mints/transfers xPNTs to buyer after successful purchase.
 // XPNTS_ENABLED env var gates this feature.
 
-import { createWalletClient, createPublicClient, http, parseAbi, getAddress } from "viem";
+import { createWalletClient, http, parseAbi, getAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
 const XPNTS_ABI = parseAbi([
@@ -10,6 +10,10 @@ const XPNTS_ABI = parseAbi([
   "function transfer(address to, uint256 amount) external returns (bool)",
   "function balanceOf(address) external view returns (uint256)"
 ]);
+
+// In-process dedup: prevents double-reward on retry within the same worker process.
+// A restart will clear this, but at-least-once delivery is still bounded to one per process lifetime.
+const _rewardedPurchases = new Set();
 
 /**
  * Reward a buyer with xPNTs after a successful purchase.
@@ -25,6 +29,12 @@ const XPNTS_ABI = parseAbi([
  */
 export async function rewardBuyerXpnts({ buyer, purchaseId, quantity, chain, rpcUrl }) {
   if (!process.env.XPNTS_ENABLED || process.env.XPNTS_ENABLED !== "true") {
+    return null;
+  }
+
+  // Dedup: skip if already rewarded for this purchaseId in this process
+  if (_rewardedPurchases.has(purchaseId)) {
+    console.log(`[xpntsReward] already rewarded purchaseId=${purchaseId} — skipping`);
     return null;
   }
 
@@ -65,31 +75,19 @@ export async function rewardBuyerXpnts({ buyer, purchaseId, quantity, chain, rpc
       account
     });
 
-    // Try mint first; fall back to transfer if mint reverts
-    let txHash;
-    try {
-      txHash = await walletClient.writeContract({
-        address: xpntsAddress,
-        abi: XPNTS_ABI,
-        functionName: "mint",
-        args: [buyerAddress, amount]
-      });
-    } catch (mintErr) {
-      console.warn(`[xpntsReward] mint failed (purchaseId=${purchaseId}), trying transfer: ${mintErr?.message ?? mintErr}`);
-      try {
-        txHash = await walletClient.writeContract({
-          address: xpntsAddress,
-          abi: XPNTS_ABI,
-          functionName: "transfer",
-          args: [buyerAddress, amount]
-        });
-      } catch (transferErr) {
-        console.error(`[xpntsReward] transfer also failed (purchaseId=${purchaseId}): ${transferErr?.message ?? transferErr}`);
-        return null;
-      }
-    }
+    // Determine reward method: XPNTS_REWARD_METHOD=mint (default) or transfer
+    const method = (process.env.XPNTS_REWARD_METHOD ?? "mint") === "transfer" ? "transfer" : "mint";
+    const txHash = await walletClient.writeContract({
+      address: xpntsAddress,
+      abi: XPNTS_ABI,
+      functionName: method,
+      args: [buyerAddress, amount]
+    });
 
-    console.log(`[xpntsReward] rewarded buyer=${buyerAddress} amount=${amount.toString()} txHash=${txHash} purchaseId=${purchaseId}`);
+    // Mark as rewarded only after successful broadcast to prevent retry double-spend
+    _rewardedPurchases.add(purchaseId);
+
+    console.log(`[xpntsReward] rewarded buyer=${buyerAddress} amount=${amount.toString()} txHash=${txHash} purchaseId=${purchaseId} method=${method}`);
     return { txHash, amount, buyer: buyerAddress };
   } catch (e) {
     console.error(`[xpntsReward] unexpected error (purchaseId=${purchaseId}): ${e?.message ?? e}`);

@@ -142,11 +142,11 @@ contract EligibilityValidatorsTest is Test {
         assertTrue(result);
     }
 
-    function test_sbtValidator_zeroNftContract_returnsOpen() external {
-        // address(0) nftContract means misconfigured = open access
+    function test_sbtValidator_zeroNftContract_returnsClosed() external {
+        // address(0) nftContract means misconfigured → fail closed (security fix)
         bytes memory data = abi.encode(address(0), uint256(1));
         bool result = sbtValidator.checkEligibility(buyer, recipient, 1, SHOP_ID, 1, data, "");
-        assertTrue(result);
+        assertFalse(result);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -180,10 +180,11 @@ contract EligibilityValidatorsTest is Test {
         assertFalse(result);
     }
 
-    function test_tokenValidator_zeroToken_returnsOpen() external {
+    function test_tokenValidator_zeroToken_returnsClosed() external {
+        // address(0) token means misconfigured → fail closed (security fix)
         bytes memory data = abi.encode(address(0), uint256(1 ether));
         bool result = tokenValidator.checkEligibility(buyer, recipient, 1, SHOP_ID, 1, data, "");
-        assertTrue(result);
+        assertFalse(result);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
