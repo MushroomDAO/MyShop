@@ -82,4 +82,58 @@ contract X402AccessActionTest is Test {
         vm.expectRevert();
         _exec(recipient, 1, badData);
     }
+
+    // ── test_x402_singleMint ───────────────────────────────────────────────────
+
+    /// @dev quantity=1 mints exactly one token and emits one X402AccessGranted event.
+    function test_x402_singleMint() external {
+        vm.expectEmit(true, true, true, true);
+        emit X402AccessAction.X402AccessGranted(recipient, address(nft), 1, resourceUri);
+
+        _exec(recipient, 1, _data(address(nft), resourceUri));
+
+        assertEq(nft.nextTokenId(), 1, "one token minted");
+        assertEq(nft.ownerOf(1), recipient, "recipient owns token");
+    }
+
+    // ── test_x402_batchMint ────────────────────────────────────────────────────
+
+    /// @dev quantity=3 mints 3 tokens and emits 3 X402AccessGranted events.
+    function test_x402_batchMint() external {
+        vm.expectEmit(true, true, true, true);
+        emit X402AccessAction.X402AccessGranted(recipient, address(nft), 1, resourceUri);
+        vm.expectEmit(true, true, true, true);
+        emit X402AccessAction.X402AccessGranted(recipient, address(nft), 2, resourceUri);
+        vm.expectEmit(true, true, true, true);
+        emit X402AccessAction.X402AccessGranted(recipient, address(nft), 3, resourceUri);
+
+        _exec(recipient, 3, _data(address(nft), resourceUri));
+
+        assertEq(nft.nextTokenId(), 3, "three tokens minted");
+        assertEq(nft.ownerOf(1), recipient);
+        assertEq(nft.ownerOf(2), recipient);
+        assertEq(nft.ownerOf(3), recipient);
+    }
+
+    // ── test_x402_quantityZeroDefaultsToOne ───────────────────────────────────
+
+    /// @dev quantity=0 is treated as 1 — exactly one token minted.
+    function test_x402_quantityZeroDefaultsToOne() external {
+        _exec(recipient, 0, _data(address(nft), resourceUri));
+
+        assertEq(nft.nextTokenId(), 1, "quantity 0 should default to 1 mint");
+        assertEq(nft.ownerOf(1), recipient, "recipient owns the minted token");
+    }
+
+    // ── test_x402_resourceUriInEvent ──────────────────────────────────────────
+
+    /// @dev The resourceUri passed in actionData is faithfully forwarded in the event.
+    function test_x402_resourceUriInEvent() external {
+        string memory specificUri = "https://api.example.com/premium/99";
+
+        vm.expectEmit(true, true, true, true);
+        emit X402AccessAction.X402AccessGranted(recipient, address(nft), 1, specificUri);
+
+        _exec(recipient, 1, _data(address(nft), specificUri));
+    }
 }
