@@ -20,10 +20,11 @@ let _endUserClientResult = undefined; // undefined = not yet tried; null = faile
 
 async function _loadEndUserClient() {
   if (_endUserClientResult !== undefined) return _endUserClientResult;
+  // Try AASTAR_SDK_PATH env override first (useful for local dev with unpublished SDK),
+  // then fall back to the npm package name.
+  const sdkPath = process.env.AASTAR_SDK_PATH ?? "@aastar/enduser";
   try {
-    const mod = await import(
-      "/Users/jason/Dev/mycelium/my-exploration/projects/aastar-sdk/packages/enduser/dist/UserClient.js"
-    );
+    const mod = await import(sdkPath);
     const cls = mod.UserClient ?? null;
     _endUserClientResult = cls;
     return cls;
