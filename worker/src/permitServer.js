@@ -462,7 +462,7 @@ export async function startPermitServer({
           serialHash = keccak256(toBytes(seed));
         }
 
-        const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600); // 1 hour from now
+        const deadline = BigInt(Math.floor(Date.now() / 1000) + 300); // 5 minutes — short TTL limits nonce-grief attack window
         const nonce = await _resolveNonce(publicClient, itemsAddress, buyer, null);
 
         const signature = await walletClients.serial.signTypedData({
