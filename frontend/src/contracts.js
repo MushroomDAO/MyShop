@@ -442,6 +442,33 @@ export const myShopItemsAbi = [
   }
 ];
 
+export const disputeEscrowAbi = [
+  { name: "openDispute", type: "function", inputs: [
+    { name: "purchaseId", type: "bytes32" },
+    { name: "payToken", type: "address" },
+    { name: "amount", type: "uint256" }
+  ], outputs: [], stateMutability: "nonpayable" },
+  { name: "cancelDispute", type: "function", inputs: [{ name: "purchaseId", type: "bytes32" }], outputs: [], stateMutability: "nonpayable" },
+  { name: "disputes", type: "function", inputs: [{ name: "", type: "bytes32" }], outputs: [
+    { name: "buyer", type: "address" },
+    { name: "payToken", type: "address" },
+    { name: "amount", type: "uint256" },
+    { name: "resolved", type: "bool" },
+    { name: "buyerWon", type: "bool" }
+  ], stateMutability: "view" },
+  { name: "DisputeOpened", type: "event", inputs: [
+    { name: "purchaseId", type: "bytes32", indexed: true },
+    { name: "buyer", type: "address", indexed: true },
+    { name: "payToken", type: "address", indexed: false },
+    { name: "amount", type: "uint256", indexed: false }
+  ] },
+  { name: "DisputeResolved", type: "event", inputs: [
+    { name: "purchaseId", type: "bytes32", indexed: true },
+    { name: "winner", type: "address", indexed: true },
+    { name: "buyerWon", type: "bool", indexed: false }
+  ] }
+];
+
 export const erc20Abi = [
   {
     type: "function",

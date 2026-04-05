@@ -82,7 +82,9 @@ function getRuntimeConfig() {
     workerApiUrl: stored.workerApiUrl || envCfg.workerApiUrl || "",
     apntsSaleUrl: stored.apntsSaleUrl || envCfg.apntsSaleUrl || "",
     gtokenSaleUrl: stored.gtokenSaleUrl || envCfg.gtokenSaleUrl || "",
-    ipfsGateway: stored.ipfsGateway || envCfg.ipfsGateway || ""
+    ipfsGateway: stored.ipfsGateway || envCfg.ipfsGateway || "",
+    disputeEscrowAddress: stored.disputeEscrowAddress || envCfg.disputeEscrowAddress || "",
+    disputeWindowSeconds: stored.disputeWindowSeconds || envCfg.disputeWindowSeconds || 604800
   };
 }
 
@@ -2010,7 +2012,9 @@ function applyConfigFromInputs() {
     workerApiUrl: val("workerApiUrl") || "",
     ipfsGateway: val("ipfsGateway") || "",
     apntsSaleUrl: val("apntsSaleUrl") || "",
-    gtokenSaleUrl: val("gtokenSaleUrl") || ""
+    gtokenSaleUrl: val("gtokenSaleUrl") || "",
+    disputeEscrowAddress: val("disputeEscrowAddress") || "",
+    disputeWindowSeconds: val("disputeWindowSeconds") ? Number(val("disputeWindowSeconds")) : 604800
   };
   runtimeCfg = next;
   saveStoredConfig(next);
@@ -2721,6 +2725,11 @@ function buildPurchaseProof(p) {
   };
 }
 
+// M4: Compute purchaseId for DisputeEscrow — keccak256(abi.encodePacked(itemId, tokenId, buyer))
+function computePurchaseId(itemId, tokenId, buyer) {
+  return keccak256(encodePacked(["uint256", "uint256", "address"], [BigInt(itemId), BigInt(tokenId), buyer]));
+}
+
 function renderPurchasesList(container, { purchases, emptyText }) {
   container.innerHTML = "";
   if (!Array.isArray(purchases) || purchases.length === 0) {
@@ -3010,6 +3019,116 @@ async function renderMyHistoryPage(container) {
       ])
     );
     listBox.appendChild(row);
+
+    // M4 F16/F17/F18: Dispute status badge and Open Dispute button
+    const disputeEscrowAddress = runtimeCfg.disputeEscrowAddress;
+    if (disputeEscrowAddress && p.firstTokenId != null && connectedAddress) {
+      const disputeRow = el("div", { style: "margin-top: 6px;" });
+      row.appendChild(disputeRow);
+
+      let purchaseId = null;
+      try {
+        purchaseId = computePurchaseId(p.itemId, p.firstTokenId, connectedAddress);
+      } catch {
+        // skip if unable to compute
+      }
+
+      if (purchaseId) {
+        (async () => {
+          try {
+            const workerApiBase = normalizeBaseUrl(runtimeCfg.workerApiUrl);
+            let disputeStatus = null;
+            if (workerApiBase) {
+              try {
+                const url = new URL(`/disputes/${purchaseId}`, workerApiBase);
+                const res = await fetch(url.toString());
+                if (res.ok) {
+                  const json = await res.json();
+                  if (json?.ok) disputeStatus = json;
+                }
+              } catch {
+                // worker unreachable — skip
+              }
+            }
+
+            // F17: Dispute status badge
+            if (disputeStatus) {
+              const { status, txHash: disputeTxHash } = disputeStatus;
+              let badgeColor = "#9ca3af";
+              let badgeText = "";
+              if (status === "open") { badgeColor = "#f97316"; badgeText = "Dispute: pending jury"; }
+              else if (status === "resolved_buyer") { badgeColor = "#22c55e"; badgeText = "Dispute resolved: You won — funds returned"; }
+              else if (status === "resolved_shop") { badgeColor = "#ef4444"; badgeText = "Dispute resolved: Shop retained funds"; }
+              else if (status === "cancelled") { badgeColor = "#9ca3af"; badgeText = "Dispute cancelled"; }
+
+              if (badgeText) {
+                disputeRow.appendChild(
+                  el("span", {
+                    text: badgeText,
+                    style: `background:${badgeColor}; color:#fff; border-radius:4px; padding:2px 7px; font-size:0.85em; margin-right:6px;`
+                  })
+                );
+              }
+
+              // F18: Link to dispute tx on explorer
+              if (disputeTxHash && explorerBase) {
+                disputeRow.appendChild(
+                  el("a", { href: `${explorerBase}/tx/${disputeTxHash}`, target: "_blank", rel: "noreferrer", text: "dispute tx", style: "font-size:0.85em; margin-right:6px;" })
+                );
+              }
+            }
+
+            // F16: Show Open Dispute button if no active/resolved dispute and within window
+            const alreadyDisputed = disputeStatus && (disputeStatus.status === "open" || disputeStatus.status === "resolved_buyer" || disputeStatus.status === "resolved_shop");
+            const windowSec = Number(runtimeCfg.disputeWindowSeconds ?? 604800);
+            const purchaseTimestamp = p.timestamp ? Number(p.timestamp) : null;
+            const nowSec = Math.floor(Date.now() / 1000);
+            const withinWindow = purchaseTimestamp == null || (nowSec - purchaseTimestamp) < windowSec;
+
+            if (!alreadyDisputed && withinWindow) {
+              const btnDispute = el("button", {
+                text: "Open Dispute",
+                style: "font-size:0.85em; margin-left:4px; background:#f97316; color:#fff; border:none; border-radius:4px; padding:2px 8px; cursor:pointer;",
+                onclick: async () => {
+                  try {
+                    if (!walletClient) throw new Error("Connect wallet first");
+                    const payToken = item?.payToken || "0x0000000000000000000000000000000000000000";
+                    const defaultAmount = item?.unitPrice ? String(item.unitPrice) : "0";
+                    const amountInput = prompt(`Dispute amount (in token units, default: ${defaultAmount}):`, defaultAmount);
+                    if (amountInput === null) return;
+                    const amount = BigInt(amountInput || defaultAmount);
+
+                    btnDispute.disabled = true;
+                    btnDispute.textContent = "Submitting...";
+
+                    const escrowAddr = getAddress(disputeEscrowAddress);
+                    const hash = await walletClient.writeContract({
+                      address: escrowAddr,
+                      abi: disputeEscrowAbi,
+                      functionName: "openDispute",
+                      args: [purchaseId, payToken, amount],
+                      account: getAddress(connectedAddress),
+                      chain
+                    });
+                    btnDispute.textContent = `Pending: ${shortHex(hash)}`;
+                    await publicClient.waitForTransactionReceipt({ hash });
+                    btnDispute.textContent = "Dispute opened!";
+                    btnDispute.style.background = "#22c55e";
+                  } catch (e) {
+                    btnDispute.disabled = false;
+                    btnDispute.textContent = "Open Dispute";
+                    alert(`Failed to open dispute: ${getErrorText(e)}`);
+                  }
+                }
+              });
+              disputeRow.appendChild(btnDispute);
+            }
+          } catch {
+            // non-fatal
+          }
+        })();
+      }
+    }
 
     // Async populate item name from IPFS metadata
     if (item && item.tokenURI) {
