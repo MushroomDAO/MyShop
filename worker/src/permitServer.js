@@ -2,7 +2,7 @@ import http from "node:http";
 import { URL } from "node:url";
 import { openDb, getDbPath } from "./db.js";
 
-import { encodeAbiParameters, getAddress, http as httpTransport, keccak256, parseAbiParameters, toBytes } from "viem";
+import { encodeAbiParameters, encodeFunctionData, getAddress, http as httpTransport, keccak256, parseAbiParameters, toBytes } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { createPublicClient, createWalletClient } from "viem";
 
@@ -261,7 +261,7 @@ export async function startPermitServer({
         return;
       }
 
-      if (limiter.enabled && (url.pathname === "/serial-permit" || url.pathname === "/risk-allowance")) {
+      if (limiter.enabled && (url.pathname === "/serial-permit" || url.pathname === "/risk-allowance" || url.pathname === "/gasless-permit")) {
         _rateLimitOrThrow({ req, url, limiter });
       }
 
@@ -411,6 +411,127 @@ export async function startPermitServer({
         });
         stats.okTotal += 1;
         stats.okRiskAllowanceTotal += 1;
+        return;
+      }
+
+      // W8: gasless permit — POST /gasless-permit
+      // Returns a signed SerialPermit + encoded buyGasless() calldata so the
+      // frontend (or an SDK) can construct a full ERC-4337 UserOp without
+      // making additional RPC calls.
+      if (url.pathname === "/gasless-permit") {
+        _requireMethod(req, ["POST"]);
+        if (!walletClients.serial) {
+          throw new HttpError({
+            status: 500,
+            code: "signer_not_configured",
+            message: "SERIAL_SIGNER_PRIVATE_KEY not set"
+          });
+        }
+
+        // Parse POST body
+        const body = await _readJsonBody(req);
+        const { itemId: itemIdRaw, buyerAddress: buyerRaw, quantity: quantityRaw, serialHash: serialHashParam } = body ?? {};
+
+        if (!itemIdRaw) throw new HttpError({ status: 400, code: "missing_param", message: "Missing: itemId", details: { param: "itemId" } });
+        if (!buyerRaw) throw new HttpError({ status: 400, code: "missing_param", message: "Missing: buyerAddress", details: { param: "buyerAddress" } });
+        if (!quantityRaw) throw new HttpError({ status: 400, code: "missing_param", message: "Missing: quantity", details: { param: "quantity" } });
+
+        let buyer;
+        try { buyer = getAddress(String(buyerRaw)); } catch {
+          throw new HttpError({ status: 400, code: "invalid_param", message: "Invalid address: buyerAddress", details: { param: "buyerAddress" } });
+        }
+
+        if (!/^\d+$/.test(String(itemIdRaw))) throw new HttpError({ status: 400, code: "invalid_param", message: "Invalid uint: itemId", details: { param: "itemId" } });
+        const itemId = BigInt(String(itemIdRaw));
+        if (itemId < 1n) throw new HttpError({ status: 400, code: "invalid_param", message: "itemId must be >= 1", details: { param: "itemId" } });
+
+        if (!/^\d+$/.test(String(quantityRaw))) throw new HttpError({ status: 400, code: "invalid_param", message: "Invalid uint: quantity", details: { param: "quantity" } });
+        const quantity = BigInt(String(quantityRaw));
+        if (quantity < 1n) throw new HttpError({ status: 400, code: "invalid_param", message: "quantity must be >= 1", details: { param: "quantity" } });
+
+        // Resolve serialHash
+        let serialHash;
+        if (serialHashParam) {
+          if (!/^0x[0-9a-fA-F]{64}$/.test(String(serialHashParam))) {
+            throw new HttpError({ status: 400, code: "invalid_param", message: "Invalid bytes32: serialHash", details: { param: "serialHash" } });
+          }
+          serialHash = String(serialHashParam);
+        } else {
+          // Auto-generate a deterministic serialHash (same logic as mock serial issuer)
+          const seed = `myshop:gaslessPermit:v1:${buyer}:${itemId.toString()}`;
+          serialHash = keccak256(toBytes(seed));
+        }
+
+        const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600); // 1 hour from now
+        const nonce = await _resolveNonce(publicClient, itemsAddress, buyer, null);
+
+        const signature = await walletClients.serial.signTypedData({
+          domain: { name: "MyShop", version: "1", chainId: domainChainId, verifyingContract: getAddress(itemsAddress) },
+          types: {
+            SerialPermit: [
+              { name: "itemId", type: "uint256" },
+              { name: "buyer", type: "address" },
+              { name: "serialHash", type: "bytes32" },
+              { name: "deadline", type: "uint256" },
+              { name: "nonce", type: "uint256" }
+            ]
+          },
+          primaryType: "SerialPermit",
+          message: { itemId, buyer, serialHash, deadline, nonce }
+        });
+
+        // Encode extraData (same format as /serial-permit)
+        const extraData = encodeAbiParameters(
+          parseAbiParameters("bytes32 serialHash,uint256 deadline,uint256 nonce,bytes sig"),
+          [serialHash, deadline, nonce, signature]
+        );
+
+        // Encode the buyGasless() calldata so the frontend can plug it directly into a UserOp
+        // buyGasless(uint256 itemId, uint256 quantity, address recipient, address payer, bytes extraData)
+        const buyGaslessAbi = [
+          {
+            type: "function",
+            name: "buyGasless",
+            stateMutability: "payable",
+            inputs: [
+              { name: "itemId", type: "uint256" },
+              { name: "quantity", type: "uint256" },
+              { name: "recipient", type: "address" },
+              { name: "payer", type: "address" },
+              { name: "extraData", type: "bytes" }
+            ],
+            outputs: [{ name: "firstTokenId", type: "uint256" }]
+          }
+        ];
+
+        // recipient = buyer (same address); payer = buyer (the economic actor)
+        // The frontend or SDK may override recipient before submitting the UserOp.
+        const calldata = encodeFunctionData({
+          abi: buyGaslessAbi,
+          functionName: "buyGasless",
+          args: [itemId, quantity, buyer, buyer, extraData]
+        });
+
+        const SUPER_PAYMASTER_ADDRESS = process.env.SUPER_PAYMASTER_ADDRESS || "0x829C3178DeF488C2dB65207B4225e18824696860";
+
+        _json(res, 200, {
+          ok: true,
+          buyer,
+          itemId: itemId.toString(),
+          quantity: quantity.toString(),
+          serialHash,
+          deadline: deadline.toString(),
+          nonce: nonce.toString(),
+          signature,
+          extraData,
+          paymasterData: {
+            paymasterAddress: SUPER_PAYMASTER_ADDRESS,
+            chainId: domainChainId,
+            itemsContract: getAddress(itemsAddress)
+          },
+          calldata
+        });
+        stats.okTotal += 1;
         return;
       }
 
@@ -612,6 +733,18 @@ function _evictIfNeeded(limiter, nowMs) {
     }
   }
   if (oldestKey != null) limiter.buckets.delete(oldestKey);
+}
+
+function _readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (chunk) => { data += chunk; });
+    req.on("end", () => {
+      if (!data) { resolve({}); return; }
+      try { resolve(JSON.parse(data)); } catch { resolve({}); }
+    });
+    req.on("error", reject);
+  });
 }
 
 async function _resolveNonce(publicClient, itemsAddress, user, nonceParam) {

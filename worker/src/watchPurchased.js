@@ -47,6 +47,26 @@ export async function watchPurchased({
           topics: log.topics
         });
 
+        // W9: detect gasless (ERC-4337 / Paymaster) purchases.
+        // In a standard EOA tx, tx.from == the buyer (msg.sender in the contract).
+        // In an AA UserOp submitted via EntryPoint/Paymaster, tx.from is the
+        // bundler/relayer address, which differs from the buyer recorded in the event.
+        // We fetch the transaction to compare tx.from with the on-chain buyer.
+        let gasless = false;
+        try {
+          if (log.transactionHash) {
+            const tx = await client.getTransaction({ hash: log.transactionHash });
+            // tx.from is the EOA that submitted the transaction (bundler in AA flow).
+            // decoded.args.buyer is the msg.sender recorded by the contract.
+            // If they differ, the tx was submitted by a third party (bundler / paymaster).
+            if (tx && tx.from && decoded.args.buyer) {
+              gasless = tx.from.toLowerCase() !== decoded.args.buyer.toLowerCase();
+            }
+          }
+        } catch {
+          // non-fatal: gasless detection is best-effort
+        }
+
         const payload = {
           chainId: chain.id,
           txHash: log.transactionHash,
@@ -60,7 +80,8 @@ export async function watchPurchased({
           payAmount: decoded.args.payAmount?.toString(),
           platformFeeAmount: decoded.args.platformFeeAmount?.toString(),
           serialHash: decoded.args.serialHash,
-          firstTokenId: decoded.args.firstTokenId?.toString()
+          firstTokenId: decoded.args.firstTokenId?.toString(),
+          gasless
         };
 
         const enriched = await enrichPurchased({
@@ -114,6 +135,7 @@ async function _sendTelegram(telegram, payload) {
     `platformFeeAmount: ${payload.platformFeeAmount}\n` +
     `serialHash: ${payload.serialHash}\n` +
     `firstTokenId: ${payload.firstTokenId}\n` +
+    `gasless: ${payload.gasless ?? false}\n` +
     `shopTreasury: ${payload.shop?.treasury ?? ""}\n` +
     `nft: ${payload.item?.nftContract ?? ""}\n` +
     `tokenURI: ${payload.item?.tokenURI ?? ""}\n` +
