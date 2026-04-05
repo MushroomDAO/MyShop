@@ -2823,7 +2823,7 @@ async function fetchIpfsMetadata(tokenURI) {
 
 // F3: Purchase state machine
 // States: idle -> checking -> awaiting_permit -> awaiting_approval -> pending -> confirming -> success | error
-let purchaseState = { state: "idle", txHash: null, tokenId: null, error: null, blockNumber: null };
+let purchaseState = { state: "idle", txHash: null, tokenId: null, error: null, blockNumber: null, subscriptionExpiresAt: null };
 
 function setPurchaseState(next) {
   purchaseState = { ...purchaseState, ...next };
@@ -2862,11 +2862,20 @@ function renderPurchaseStateBars() {
   }
   else if (state === "success") {
     const explorerBase = explorerBaseUrl(chain?.id);
+    const { subscriptionExpiresAt } = purchaseState;
     for (const bar of bars) {
       bar.innerHTML = "";
       bar.style.color = "#16a34a";
       bar.appendChild(el("span", { text: `Redeemed!${tokenId != null ? ` NFT #${tokenId} received` : ""} ` }));
-      bar.appendChild(el("a", { href: "#/my", text: "View My NFTs" }));
+      // F20: show subscription expiry if present
+      if (subscriptionExpiresAt) {
+        const expiryDate = new Date(subscriptionExpiresAt * 1000).toLocaleString();
+        bar.appendChild(el("span", {
+          style: "margin-left:6px;color:#1d4ed8;font-weight:500;",
+          text: `Your subscription expires: ${expiryDate}`
+        }));
+      }
+      bar.appendChild(el("a", { href: "#/my", text: " View My NFTs" }));
     }
     return;
   }
@@ -2912,8 +2921,9 @@ async function buyWithStateMachine({ itemId, quantity, recipient, extraData, eth
         })
     });
 
-    // Try to read firstTokenId from logs
+    // Try to read firstTokenId and subscription expiry from logs
     let tokenId = null;
+    let subscriptionExpiresAt = null;
     try {
       if (lastTx?.hash) {
         const receipt = await publicClient.getTransactionReceipt({ hash: lastTx.hash });
@@ -2922,7 +2932,15 @@ async function buyWithStateMachine({ itemId, quantity, recipient, extraData, eth
             const decoded = decodeEventLog({ abi: myShopItemsAbi, data: log.data, topics: log.topics });
             if (decoded?.eventName === "Purchased" && decoded.args?.firstTokenId != null) {
               tokenId = decoded.args.firstTokenId.toString();
-              break;
+            }
+          } catch {
+            // skip
+          }
+          // F20: decode SubscriptionGranted to get expiresAt
+          try {
+            const decoded = decodeEventLog({ abi: subscriptionActionAbi, data: log.data, topics: log.topics });
+            if (decoded?.eventName === "SubscriptionGranted" && decoded.args?.expiresAt != null) {
+              subscriptionExpiresAt = Number(decoded.args.expiresAt);
             }
           } catch {
             // skip
@@ -2932,7 +2950,7 @@ async function buyWithStateMachine({ itemId, quantity, recipient, extraData, eth
     } catch {
       // non-fatal
     }
-    setPurchaseState({ state: "success", tokenId });
+    setPurchaseState({ state: "success", tokenId, subscriptionExpiresAt });
   } catch (e) {
     const errMsg = getErrorText(e);
     setPurchaseState({ state: "error", error: errMsg });
