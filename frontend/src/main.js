@@ -82,7 +82,9 @@ function getRuntimeConfig() {
     workerApiUrl: stored.workerApiUrl || envCfg.workerApiUrl || "",
     apntsSaleUrl: stored.apntsSaleUrl || envCfg.apntsSaleUrl || "",
     gtokenSaleUrl: stored.gtokenSaleUrl || envCfg.gtokenSaleUrl || "",
-    ipfsGateway: stored.ipfsGateway || envCfg.ipfsGateway || ""
+    ipfsGateway: stored.ipfsGateway || envCfg.ipfsGateway || "",
+    // M2: stored as string "true"/"false" to survive JSON round-trip
+    enableGasless: stored.enableGasless != null ? stored.enableGasless : Boolean(envCfg.enableGasless)
   };
 }
 
@@ -1641,6 +1643,49 @@ async function buy() {
   )}&source=auto`;
 }
 
+/// F13/F14: Gasless buy preview — calls /gasless-permit on the worker,
+/// then shows the returned calldata + paymasterData in a modal.
+/// Full UserOp submission via AAStar SDK is deferred (Phase 1.5).
+/// TODO(M2-Phase1.5): integrate AAStar EndUserClient.executeGasless() here
+/// to build and submit the complete ERC-4337 UserOp to the bundler.
+async function buyGaslessPreview() {
+  if (!walletClient || !connectedAddress) throw new Error("connect wallet first");
+  const workerUrl = getCurrentCfgValue("workerUrl");
+  if (!workerUrl) throw new Error("workerUrl not configured — set it in #/config");
+  const itemId = val("buyItemId");
+  const quantity = val("buyQty") || "1";
+  const buyer = connectedAddress ? getAddress(connectedAddress) : requireAddress(val("buyBuyer"), "buyer");
+
+  const res = await fetch(`${workerUrl}/gasless-permit`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ itemId, buyerAddress: buyer, quantity })
+  });
+  const json = await res.json();
+  if (!res.ok || !json.ok) throw new Error(json.error || `gasless-permit error: HTTP ${res.status}`);
+
+  // Show the result in a simple modal so the user can inspect / copy
+  const modal = document.createElement("div");
+  modal.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center";
+  const box = document.createElement("div");
+  box.style.cssText = "background:#fff;border-radius:8px;padding:20px;max-width:700px;width:90%;max-height:80vh;overflow:auto";
+  box.appendChild(Object.assign(document.createElement("h3"), { textContent: "Gasless Buy — Permit + Calldata" }));
+  box.appendChild(Object.assign(document.createElement("p"), {
+    textContent: "The worker has signed a SerialPermit and encoded the buyGasless() calldata. Copy these into your AAStar SDK UserOp builder to submit the transaction gaslessly."
+  }));
+  const pre = document.createElement("pre");
+  pre.style.cssText = "font-size:0.75em;white-space:pre-wrap;word-break:break-all;background:#f8fafc;padding:12px;border-radius:4px";
+  pre.textContent = JSON.stringify(json, null, 2);
+  box.appendChild(pre);
+  const closeBtn = document.createElement("button");
+  closeBtn.textContent = "Close";
+  closeBtn.onclick = () => document.body.removeChild(modal);
+  box.appendChild(closeBtn);
+  modal.appendChild(box);
+  modal.addEventListener("click", (e) => { if (e.target === modal) document.body.removeChild(modal); });
+  document.body.appendChild(modal);
+}
+
 async function setShopRolesTx() {
   if (!walletClient || !connectedAddress) throw new Error("connect wallet first");
   const shopsAddress = requireAddress(val("shopsAddress"), "shopsAddress");
@@ -2010,7 +2055,8 @@ function applyConfigFromInputs() {
     workerApiUrl: val("workerApiUrl") || "",
     ipfsGateway: val("ipfsGateway") || "",
     apntsSaleUrl: val("apntsSaleUrl") || "",
-    gtokenSaleUrl: val("gtokenSaleUrl") || ""
+    gtokenSaleUrl: val("gtokenSaleUrl") || "",
+    enableGasless: document.getElementById("enableGasless") ? document.getElementById("enableGasless").checked : Boolean(runtimeCfg.enableGasless)
   };
   runtimeCfg = next;
   saveStoredConfig(next);
@@ -3392,7 +3438,15 @@ async function renderBuyer(container) {
       inputRow("extraData(hex)", "buyExtraData", "0x"),
       el("button", { text: "Fetch extraData", onclick: () => fetchSerialExtraData().catch(showTxError) }),
       inputRow("ethValue(optional)", "buyEthValue", ""),
-      el("button", { id: "btnBuy", text: "Buy", onclick: () => buy().catch(showTxError) })
+      el("button", { id: "btnBuy", text: "Buy", onclick: () => buy().catch(showTxError) }),
+      ...(runtimeCfg.enableGasless ? [
+        el("button", {
+          id: "btnBuyGasless",
+          text: "Buy with Smart Wallet (Gasless)",
+          style: "margin-left:8px;background:#f0fdf4;border:1px solid #16a34a;color:#15803d",
+          onclick: () => buyGaslessPreview().catch(showTxError)
+        })
+      ] : [])
     ])
   );
 
@@ -4079,6 +4133,12 @@ async function renderConfig(container) {
       inputRow("IPFS_GATEWAY (eg. https://gw.example.com)", "ipfsGateway"),
       inputRow("APNTS_SALE_URL", "apntsSaleUrl"),
       inputRow("GTOKEN_SALE_URL", "gtokenSaleUrl"),
+      el("div", {}, [
+        el("label", {}, [
+          el("input", { id: "enableGasless", type: "checkbox" }),
+          el("span", { text: " ENABLE_GASLESS — show gasless buy button (M2 / ERC-4337 + SuperPaymaster)" })
+        ])
+      ]),
       el("button", {
         text: "Fill from env",
         onclick: () => {
@@ -4094,6 +4154,7 @@ async function renderConfig(container) {
           document.getElementById("ipfsGateway").value = envCfg.ipfsGateway || "";
           document.getElementById("apntsSaleUrl").value = envCfg.apntsSaleUrl || "";
           document.getElementById("gtokenSaleUrl").value = envCfg.gtokenSaleUrl || "";
+          document.getElementById("enableGasless").checked = Boolean(envCfg.enableGasless);
         }
       }),
       el("button", {
@@ -4111,6 +4172,7 @@ async function renderConfig(container) {
           document.getElementById("ipfsGateway").value = runtimeCfg.ipfsGateway || "";
           document.getElementById("apntsSaleUrl").value = runtimeCfg.apntsSaleUrl || "";
           document.getElementById("gtokenSaleUrl").value = runtimeCfg.gtokenSaleUrl || "";
+          document.getElementById("enableGasless").checked = Boolean(runtimeCfg.enableGasless);
         }
       }),
       el("button", { text: "Load from Worker /config", onclick: () => loadConfigFromWorker().catch(showTxError) }),
@@ -4135,6 +4197,7 @@ async function renderConfig(container) {
   document.getElementById("ipfsGateway").value = runtimeCfg.ipfsGateway || "";
   document.getElementById("apntsSaleUrl").value = runtimeCfg.apntsSaleUrl || "";
   document.getElementById("gtokenSaleUrl").value = runtimeCfg.gtokenSaleUrl || "";
+  document.getElementById("enableGasless").checked = Boolean(runtimeCfg.enableGasless);
 }
 
 async function renderRolesPage(container, query = {}) {

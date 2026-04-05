@@ -297,6 +297,19 @@ export const myShopItemsAbi = [
   },
   {
     type: "function",
+    name: "buyGasless",
+    stateMutability: "payable",
+    inputs: [
+      { name: "itemId", type: "uint256" },
+      { name: "quantity", type: "uint256" },
+      { name: "recipient", type: "address" },
+      { name: "payer", type: "address" },
+      { name: "extraData", type: "bytes" }
+    ],
+    outputs: [{ name: "firstTokenId", type: "uint256" }]
+  },
+  {
+    type: "function",
     name: "items",
     stateMutability: "view",
     inputs: [{ name: "", type: "uint256" }],

@@ -16,7 +16,8 @@ export function loadConfig() {
     itemsActionAddress: import.meta.env.VITE_ITEMS_ACTION_ADDRESS ?? defaults.itemsActionAddress ?? "",
     erc721ActionAddress: import.meta.env.VITE_ERC721_ACTION_ADDRESS ?? defaults.erc721ActionAddress ?? "",
     defaultTemplateId: import.meta.env.VITE_ERC721_DEFAULT_TEMPLATE_ID ?? defaults.defaultTemplateId ?? "",
-    ipfsGateway: import.meta.env.VITE_IPFS_GATEWAY ?? defaults.ipfsGateway ?? ""
+    ipfsGateway: import.meta.env.VITE_IPFS_GATEWAY ?? defaults.ipfsGateway ?? "",
+    enableGasless: import.meta.env.VITE_ENABLE_GASLESS ?? ""
   };
 
   const cfg = {
@@ -31,7 +32,10 @@ export function loadConfig() {
     itemsActionAddress: raw.itemsActionAddress ?? "",
     erc721ActionAddress: raw.erc721ActionAddress ?? "",
     defaultTemplateId: raw.defaultTemplateId ?? "",
-    ipfsGateway: raw.ipfsGateway ?? ""
+    ipfsGateway: raw.ipfsGateway ?? "",
+    // M2: gasless purchase path via ERC-4337 AA wallet + SuperPaymaster
+    // Set VITE_ENABLE_GASLESS=true in .env to show the gasless buy button
+    enableGasless: raw.enableGasless === "true" || raw.enableGasless === "1"
   };
 
   return cfg;
