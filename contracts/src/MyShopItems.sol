@@ -200,6 +200,8 @@ contract MyShopItems {
     error NotEligible();
     error InvalidVersion();
     error InvalidURI();
+    // C11
+    error DisputeWindowTooLong();
     // C1
     error ExceedsMaxSupply();
     error ExceedsPerWallet();
@@ -429,7 +431,7 @@ contract MyShopItems {
     // C11: dispute window config (owner can adjust; per-shop override comes in M4 DisputeModule)
     uint256 public constant MAX_DISPUTE_WINDOW = 90 days;
     function setDisputeWindowSeconds(uint256 seconds_) external onlyOwner {
-        if (seconds_ > MAX_DISPUTE_WINDOW) revert InvalidPayment(); // window > 90 days not allowed
+        if (seconds_ > MAX_DISPUTE_WINDOW) revert DisputeWindowTooLong();
         emit DisputeWindowUpdated(disputeWindowSeconds, seconds_);
         disputeWindowSeconds = seconds_;
     }

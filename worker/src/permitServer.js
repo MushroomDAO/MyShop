@@ -478,21 +478,71 @@ export async function startPermitServer({
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 300); // 5 minutes — short TTL
         const nonce = await _resolveNonce(publicClient, itemsAddress, buyer, null);
 
-        const signature = await walletClients.serial.signTypedData({
-          domain: { name: "MyShop", version: "1", chainId: domainChainId, verifyingContract: getAddress(itemsAddress) },
-          types: {
-            SerialPermit: [
-              { name: "itemId", type: "uint256" },
-              { name: "buyer", type: "address" },
-              { name: "recipient", type: "address" },
-              { name: "serialHash", type: "bytes32" },
-              { name: "deadline", type: "uint256" },
-              { name: "nonce", type: "uint256" }
-            ]
-          },
-          primaryType: "SerialPermit",
-          message: { itemId, buyer, recipient: gaslessRecipient, serialHash, deadline, nonce }
-        });
+        // INSERT as gate to prevent TOCTOU: unique constraint rejects concurrent duplicates
+        let nonceReservedGasless = false;
+        try {
+          const db = openDb();
+          const info = db
+            .prepare(
+              "INSERT OR IGNORE INTO issued_nonces_v2 (chain_id, item_id, buyer, nonce, issued_at) VALUES (?, ?, ?, ?, ?)"
+            )
+            .run(Number(domainChainId), itemId.toString(), buyer.toLowerCase(), nonce.toString(), 0);
+          if (info.changes === 0) {
+            throw new HttpError({
+              status: 409,
+              code: "nonce_already_issued",
+              message: "This nonce has already been issued for this buyer and item"
+            });
+          }
+          nonceReservedGasless = true;
+        } catch (e) {
+          if (e instanceof HttpError) throw e;
+          // DB error is non-fatal — proceed without nonce dedup
+        }
+
+        let signature;
+        try {
+          signature = await walletClients.serial.signTypedData({
+            domain: { name: "MyShop", version: "1", chainId: domainChainId, verifyingContract: getAddress(itemsAddress) },
+            types: {
+              SerialPermit: [
+                { name: "itemId", type: "uint256" },
+                { name: "buyer", type: "address" },
+                { name: "recipient", type: "address" },
+                { name: "serialHash", type: "bytes32" },
+                { name: "deadline", type: "uint256" },
+                { name: "nonce", type: "uint256" }
+              ]
+            },
+            primaryType: "SerialPermit",
+            message: { itemId, buyer, recipient: gaslessRecipient, serialHash, deadline, nonce }
+          });
+        } catch (e) {
+          // Signing failed — release the reserved nonce so it can be retried
+          if (nonceReservedGasless) {
+            try {
+              const db = openDb();
+              db.prepare(
+                "DELETE FROM issued_nonces_v2 WHERE chain_id = ? AND item_id = ? AND buyer = ? AND nonce = ? AND issued_at = 0"
+              ).run(Number(domainChainId), itemId.toString(), buyer.toLowerCase(), nonce.toString());
+            } catch {
+              // best-effort cleanup
+            }
+          }
+          throw e;
+        }
+
+        // Mark nonce as fully issued (issued_at = now)
+        if (nonceReservedGasless) {
+          try {
+            const db = openDb();
+            db.prepare(
+              "UPDATE issued_nonces_v2 SET issued_at = ? WHERE chain_id = ? AND item_id = ? AND buyer = ? AND nonce = ?"
+            ).run(Math.floor(Date.now() / 1000), Number(domainChainId), itemId.toString(), buyer.toLowerCase(), nonce.toString());
+          } catch {
+            // non-fatal: nonce is still recorded on-chain after buyer uses it
+          }
+        }
 
         // Encode extraData (same format as /serial-permit)
         const extraData = encodeAbiParameters(
@@ -518,12 +568,14 @@ export async function startPermitServer({
           }
         ];
 
-        // recipient = buyer (same address); payer = buyer (the economic actor)
-        // The frontend or SDK may override recipient before submitting the UserOp.
+        // recipient = gaslessRecipient (locked into the EIP-712 signature above).
+        // payer = buyer (the economic actor whose nonce is consumed).
+        // Using gaslessRecipient here ensures the calldata matches the signed permit —
+        // if buyer != gaslessRecipient (gifting flow), the calldata must reflect that.
         const calldata = encodeFunctionData({
           abi: buyGaslessAbi,
           functionName: "buyGasless",
-          args: [itemId, quantity, buyer, buyer, extraData]
+          args: [itemId, quantity, gaslessRecipient, buyer, extraData]
         });
 
         const SUPER_PAYMASTER_ADDRESS = process.env.SUPER_PAYMASTER_ADDRESS || "0x829C3178DeF488C2dB65207B4225e18824696860";
@@ -531,6 +583,7 @@ export async function startPermitServer({
         _json(res, 200, {
           ok: true,
           buyer,
+          recipient: gaslessRecipient,
           itemId: itemId.toString(),
           quantity: quantity.toString(),
           serialHash,
