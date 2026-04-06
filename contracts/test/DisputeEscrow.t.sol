@@ -207,6 +207,15 @@ contract DisputeEscrowTest is Test {
     }
 
     // -----------------------------------------------------------------------
+    // setJuryContract — reverts on address(0) to prevent locking open disputes
+    // -----------------------------------------------------------------------
+
+    function test_setJuryContract_reverts_zeroAddress() external {
+        vm.expectRevert(DisputeEscrow.InvalidAddress.selector);
+        escrow.setJuryContract(address(0));
+    }
+
+    // -----------------------------------------------------------------------
     // openDispute — evidence too large reverts
     // -----------------------------------------------------------------------
 

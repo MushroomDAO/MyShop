@@ -61,7 +61,10 @@ contract DisputeEscrow is IJuryCallback {
         juryContract = juryContract_; // can be address(0) initially
     }
 
+    /// @notice Owner sets the JuryContract address. Must be non-zero to prevent permanently
+    ///         locking open disputes (only the cancel path would remain if jury is address(0)).
     function setJuryContract(address jury) external onlyOwner {
+        if (jury == address(0)) revert InvalidAddress();
         emit JuryContractUpdated(juryContract, jury);
         juryContract = jury;
     }
