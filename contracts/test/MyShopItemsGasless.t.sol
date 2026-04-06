@@ -163,12 +163,12 @@ contract MyShopItemsGaslessTest is Test {
     // ----------------------------------------------------------------
     // test_BuyGasless_ExplicitPayer
     // When payer != address(0), the explicit payer address is used for
-    // SerialPermit verification (permit must be signed for payer, not aaWallet).
+    // SerialPermit verification. With the recipient guard, recipient must
+    // equal the payer when payer != msg.sender.
     // ----------------------------------------------------------------
     function test_BuyGasless_ExplicitPayer() external {
         uint256 itemId = _addItem(true); // requiresSerial = true
 
-        // Sign the SerialPermit for the EOA (payer), NOT the aaWallet
         bytes32 serialHash = keccak256(abi.encodePacked("GASLESS-SERIAL-001"));
         uint256 deadline = block.timestamp + 1 hours;
         uint256 nonce = 0;
@@ -178,25 +178,98 @@ contract MyShopItemsGaslessTest is Test {
         uint256 platformBefore = usdc.balanceOf(platformTreasury);
         uint256 shopBefore = usdc.balanceOf(communityTreasury);
 
-        // aaWallet acts as caller (EntryPoint / Paymaster submits the UserOp),
-        // but the permit was issued to eoa → pass eoa as explicit payer.
+        // When payer=eoa and msg.sender=aaWallet (different), recipient must == eoa.
         vm.prank(aaWallet);
-        uint256 firstTokenId = items.buyGasless(itemId, 1, recipient, eoa, extraData);
+        uint256 firstTokenId = items.buyGasless(itemId, 1, eoa, eoa, extraData);
 
         assertEq(firstTokenId, 1);
-        assertEq(nft.ownerOf(1), recipient);
+        assertEq(nft.ownerOf(1), eoa); // NFT goes to eoa (the actual buyer)
         assertEq(usdc.balanceOf(platformTreasury) - platformBefore, 30);
         assertEq(usdc.balanceOf(communityTreasury) - shopBefore, 970);
 
-        // The nonce should be consumed against the EOA's account, not the aaWallet's
         assertTrue(items.usedNonces(eoa, nonce));
         assertFalse(items.usedNonces(aaWallet, nonce));
+    }
+
+    // ----------------------------------------------------------------
+    // test_BuyGasless_ExplicitPayer_RecipientMismatch_Reverts
+    // New guard: when payer != msg.sender, recipient must equal payer.
+    // This closes the nonce-grief vector — an attacker who holds a victim's
+    // permit and calls buyGasless(payer=victim, recipient=attacker) is rejected.
+    // ----------------------------------------------------------------
+    function test_BuyGasless_ExplicitPayer_RecipientMismatch_Reverts() external {
+        uint256 itemId = _addItem(true);
+
+        bytes32 serialHash = keccak256(abi.encodePacked("GRIEF-SERIAL-001"));
+        uint256 deadline = block.timestamp + 1 hours;
+        uint256 nonce = 0;
+        bytes memory sig = _signSerialPermit(itemId, eoa, serialHash, deadline, nonce);
+        bytes memory extraData = abi.encode(serialHash, deadline, nonce, sig);
+
+        address attacker = address(0xA77AC4);
+        usdc.mint(attacker, 1_000_000_000);
+        vm.prank(attacker);
+        usdc.approve(address(items), type(uint256).max);
+
+        // Attacker sets recipient=attacker but payer=eoa (victim) → must revert
+        vm.prank(attacker);
+        vm.expectRevert(MyShopItems.InvalidAddress.selector);
+        items.buyGasless(itemId, 1, attacker, eoa, extraData);
+
+        // Victim's nonce is untouched
+        assertFalse(items.usedNonces(eoa, nonce), "victim nonce must not be consumed");
+    }
+
+    // ----------------------------------------------------------------
+    // test_BuyGasless_ExplicitPayer_RecipientEqualsPayerBlocked
+    // If attacker is forced to set recipient=eoa (to satisfy the guard),
+    // they pay their own money but eoa receives the NFT — economically
+    // pointless for the attacker; the "grief" is eliminated.
+    // ----------------------------------------------------------------
+    function test_BuyGasless_ForcedRecipientEqualsPayer_AttackerPaysVictimReceives() external {
+        uint256 itemId = _addItem(true);
+
+        bytes32 serialHash = keccak256(abi.encodePacked("GRIEF-SERIAL-002"));
+        uint256 deadline = block.timestamp + 1 hours;
+        uint256 nonce = 0;
+        bytes memory sig = _signSerialPermit(itemId, eoa, serialHash, deadline, nonce);
+        bytes memory extraData = abi.encode(serialHash, deadline, nonce, sig);
+
+        address attacker = address(0xA77AC4);
+        usdc.mint(attacker, 1_000_000_000);
+        vm.prank(attacker);
+        usdc.approve(address(items), type(uint256).max);
+
+        // Attacker must set recipient=eoa to pass the guard.
+        // Result: attacker pays, eoa receives the NFT (victim is not harmed).
+        vm.prank(attacker);
+        items.buyGasless(itemId, 1, eoa, eoa, extraData);
+
+        assertEq(nft.ownerOf(1), eoa, "NFT goes to victim (not attacker)");
+        assertTrue(items.usedNonces(eoa, nonce), "nonce consumed but victim got the item they wanted");
+    }
+
+    // ----------------------------------------------------------------
+    // test_BuyGasless_PayerZero_RecipientFree
+    // When payer == 0 (msg.sender is the payer), the recipient guard does
+    // NOT apply — gifting via buyGasless still works.
+    // ----------------------------------------------------------------
+    function test_BuyGasless_PayerZero_RecipientFree() external {
+        uint256 itemId = _addItem(false);
+
+        // aaWallet calls with payer=0, recipient=arbitrary third party (gift)
+        vm.prank(aaWallet);
+        uint256 firstTokenId = items.buyGasless(itemId, 1, recipient, address(0), "");
+
+        assertEq(firstTokenId, 1);
+        assertEq(nft.ownerOf(1), recipient, "gift recipient receives NFT");
     }
 
     // ----------------------------------------------------------------
     // test_BuyGasless_ExplicitPayer_WrongPermitSigner_Reverts
     // If the serial permit is signed for aaWallet but payer=eoa is passed,
     // the contract must reject it (buyer mismatch in EIP-712 struct).
+    // recipient=eoa is set to pass the guard first, so the sig check fires.
     // ----------------------------------------------------------------
     function test_BuyGasless_ExplicitPayer_WrongPermitSigner_Reverts() external {
         uint256 itemId = _addItem(true);
@@ -208,9 +281,10 @@ contract MyShopItemsGaslessTest is Test {
         bytes memory sig = _signSerialPermit(itemId, aaWallet, serialHash, deadline, nonce);
         bytes memory extraData = abi.encode(serialHash, deadline, nonce, sig);
 
+        // recipient=eoa to pass guard; will still revert on signature mismatch
         vm.prank(aaWallet);
         vm.expectRevert(MyShopItems.InvalidSignature.selector);
-        items.buyGasless(itemId, 1, recipient, eoa, extraData);
+        items.buyGasless(itemId, 1, eoa, eoa, extraData);
     }
 
     // ----------------------------------------------------------------
@@ -226,66 +300,46 @@ contract MyShopItemsGaslessTest is Test {
         bytes memory sig = _signSerialPermit(itemId, eoa, serialHash, deadline, nonce);
         bytes memory extraData = abi.encode(serialHash, deadline, nonce, sig);
 
-        // Give aaWallet extra USDC for the second call attempt
         usdc.mint(aaWallet, 1_000_000_000);
 
         vm.prank(aaWallet);
-        items.buyGasless(itemId, 1, recipient, eoa, extraData);
+        items.buyGasless(itemId, 1, eoa, eoa, extraData); // first call succeeds
 
-        // Second call with the same nonce must fail
         vm.prank(aaWallet);
         vm.expectRevert(MyShopItems.NonceUsed.selector);
-        items.buyGasless(itemId, 1, recipient, eoa, extraData);
+        items.buyGasless(itemId, 1, eoa, eoa, extraData); // replay reverts
     }
 
     // ----------------------------------------------------------------
-    // test_BuyGasless_PayerNonceConsumption
+    // test_BuyGasless_PayerNonceConsumption_NowBlocked
     //
-    // DESIGN TRADE-OFF (known limitation):
-    //   buyGasless() accepts an arbitrary `payer` address from msg.sender.
-    //   A malicious relayer/attacker who holds a valid signed SerialPermit
-    //   for a victim (e.g. obtained off-chain) can call buyGasless with
-    //   payer=victim, consuming the victim's nonce and forcing the victim's
-    //   permit to be spent.
+    // Previously (before recipient guard), an attacker with victim's permit
+    // could call buyGasless(payer=victim, recipient=attacker) and consume
+    // the victim's nonce while receiving the NFT themselves.
     //
-    //   MITIGATION (off-chain / worker layer):
-    //     - The permit server (worker) only issues SerialPermits to
-    //       trusted relayers identified by allowlist or HMAC session tokens.
-    //     - Permit payloads are single-use and short-lived (deadline << 1 hr).
-    //     - The worker records issued permits and can detect reuse attempts.
-    //   This trade-off is acceptable because on-chain identity binding would
-    //   require msg.sender == payer, defeating the purpose of AA relaying.
+    // After adding the guard `require(recipient == effectivePayer when payer != msg.sender)`,
+    // this attack is blocked at the contract level.
     // ----------------------------------------------------------------
-    function test_BuyGasless_PayerNonceConsumption() external {
-        // Attacker obtains a permit signed for `eoa` (the victim). In practice
-        // this could happen if a relay leaks the signed permit off-chain.
+    function test_BuyGasless_PayerNonceConsumption_NowBlocked() external {
         uint256 itemId = _addItem(true);
 
         bytes32 serialHash = keccak256(abi.encodePacked("VICTIM-SERIAL-001"));
         uint256 deadline = block.timestamp + 1 hours;
-        uint256 nonce = 42; // arbitrary nonce that has not been used yet
+        uint256 nonce = 42;
         bytes memory sig = _signSerialPermit(itemId, eoa, serialHash, deadline, nonce);
         bytes memory extraData = abi.encode(serialHash, deadline, nonce, sig);
 
-        // Attacker is a different address that holds USDC and is not eoa.
         address attacker = address(0xA77AC4);
         usdc.mint(attacker, 1_000_000_000);
         vm.prank(attacker);
         usdc.approve(address(items), type(uint256).max);
 
-        // Attacker calls buyGasless, setting payer=eoa (the victim).
-        // The call succeeds because the contract only verifies the permit's
-        // signature against the stated payer — it does NOT require msg.sender == payer.
+        // Attack attempt: recipient=attacker, payer=eoa(victim) → now reverts
         vm.prank(attacker);
+        vm.expectRevert(MyShopItems.InvalidAddress.selector);
         items.buyGasless(itemId, 1, attacker, eoa, extraData);
 
-        // The victim's nonce is now consumed even though the victim did not call.
-        assertTrue(items.usedNonces(eoa, nonce), "victim nonce consumed by attacker call");
-        assertFalse(items.usedNonces(attacker, nonce), "attacker nonce unaffected");
-
-        // A subsequent attempt to use the same permit (e.g. by the real relayer) fails.
-        vm.prank(aaWallet);
-        vm.expectRevert(MyShopItems.NonceUsed.selector);
-        items.buyGasless(itemId, 1, recipient, eoa, extraData);
+        // Victim's nonce is untouched — attack fully blocked on-chain
+        assertFalse(items.usedNonces(eoa, nonce), "victim nonce must not be consumed");
     }
 }

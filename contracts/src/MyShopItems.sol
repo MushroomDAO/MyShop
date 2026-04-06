@@ -468,6 +468,15 @@ contract MyShopItems {
         bytes calldata extraData
     ) external payable returns (uint256 firstTokenId) {
         address effectivePayer = payer == address(0) ? msg.sender : payer;
+        // When an explicit payer is set (AA/relayer scenario), the NFT must go to the payer
+        // themselves — not to an arbitrary recipient. This closes the nonce-grief vector:
+        // an attacker who submits a victim's permit via buyGasless(payer=victim) is forced to
+        // deliver the NFT to the victim, making the "attack" economically pointless
+        // (attacker pays; victim receives the item they wanted).
+        // Regular buy() still supports gifting (msg.sender pays, recipient differs).
+        if (effectivePayer != msg.sender) {
+            if (recipient != effectivePayer) revert InvalidAddress();
+        }
         return _buy(itemId, quantity, recipient, effectivePayer, extraData);
     }
 
