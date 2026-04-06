@@ -48,7 +48,7 @@ contract MyShopItems {
     mapping(uint256 => mapping(address => uint256)) public walletPurchaseCount;
 
     // C11: dispute window — records purchase timestamp per purchaseId for DisputeModule (M4)
-    // purchaseId = keccak256(abi.encode(itemId, firstTokenId))
+    // purchaseId = keccak256(abi.encode(itemId, firstTokenId, buyer, block.timestamp))
     uint256 public disputeWindowSeconds = 7 days;
     mapping(bytes32 => uint256) public purchaseTimestamps;
 
@@ -166,8 +166,7 @@ contract MyShopItems {
     event ItemDefaultPageVersionSet(uint256 indexed itemId, uint256 indexed version);
     // C3: item pause event
     event ItemPaused(uint256 indexed itemId, bool paused);
-    // C7/C8: withdrawal events
-    event ShopBalanceWithdrawn(uint256 indexed shopId, address indexed token, address indexed to, uint256 amount);
+    // C8: rescue event (ETH or ERC20 rescued from contract by protocol owner)
     event ProtocolBalanceRescued(address indexed token, address indexed to, uint256 amount);
     event Purchased(
         uint256 indexed itemId,
@@ -208,6 +207,8 @@ contract MyShopItems {
     error SaleEnded();
     // C3
     error ItemPausedError();
+    // Reentrancy
+    error Reentrant();
 
     constructor(address shops_, address riskSigner_, address serialSigner_) {
         if (shops_ == address(0)) revert InvalidAddress();
@@ -266,21 +267,11 @@ contract MyShopItems {
         emit ItemStatusChanged(itemId, active);
     }
 
-    // C7: shop treasury withdrawal — recovers stuck ERC20 by sending to the shop's own treasury.
-    // Restricted to protocol owner only: the contract holds pooled funds (all shops share one balance),
-    // so a per-shop maintainer role would allow draining other shops' accumulated fees.
-    function withdrawShopBalance(uint256 shopId, address token) external onlyOwner {
-        if (token == address(0)) revert InvalidAddress();
-        (, address shopTreasury,, ) = shops.shops(shopId);
-        if (shopTreasury == address(0)) revert InvalidAddress();
-        uint256 bal = IERC20(token).balanceOf(address(this));
-        if (bal == 0) return;
-        bool ok = IERC20(token).transfer(shopTreasury, bal);
-        if (!ok) revert TransferFailed();
-        emit ShopBalanceWithdrawn(shopId, token, shopTreasury, bal);
-    }
-
-    // C8: protocol treasury withdrawal — owner rescues stuck ETH or ERC20 from contract
+    // C7/C8: protocol treasury withdrawal — owner rescues stuck ETH or ERC20 from contract.
+    // NOTE: withdrawShopBalance() has been removed.  It drained the ENTIRE contract balance of a
+    // token (all shops share one ERC-20 balance) and routed it to a single shop treasury, which
+    // would silently steal funds from other shops when multiple shops share a payment token.
+    // Use rescueERC20(token, shopTreasury) instead — the owner explicitly specifies the destination.
     function rescueETH(address to) external onlyOwner {
         if (to == address(0)) revert InvalidAddress();
         uint256 bal = address(this).balance;
@@ -428,14 +419,16 @@ contract MyShopItems {
 
     // C11: dispute window config (owner can adjust; per-shop override comes in M4 DisputeModule)
     uint256 public constant MAX_DISPUTE_WINDOW = 90 days;
+    error DisputeWindowTooLong();
     function setDisputeWindowSeconds(uint256 seconds_) external onlyOwner {
-        if (seconds_ > MAX_DISPUTE_WINDOW) revert InvalidPayment(); // window > 90 days not allowed
+        if (seconds_ > MAX_DISPUTE_WINDOW) revert DisputeWindowTooLong();
         emit DisputeWindowUpdated(disputeWindowSeconds, seconds_);
         disputeWindowSeconds = seconds_;
     }
 
-    // C11: returns true if the purchase is still within the dispute window
-    // purchaseId = keccak256(abi.encode(itemId, firstTokenId))
+    // C11: returns true if the purchase is still within the dispute window.
+    // purchaseId = keccak256(abi.encode(itemId, firstTokenId, buyer, block.timestamp))
+    // as recorded by buy() when the purchase was made.
     function isInDisputeWindow(bytes32 purchaseId) external view returns (bool) {
         uint256 ts = purchaseTimestamps[purchaseId];
         if (ts == 0) return false;
@@ -453,7 +446,7 @@ contract MyShopItems {
         payable
         returns (uint256 firstTokenId)
     {
-        require(_buyLock == 1, "reentrant");
+        if (_buyLock != 1) revert Reentrant();
         _buyLock = 2;
         if (quantity == 0) revert InvalidPayment();
         if (recipient == address(0)) revert InvalidAddress();
