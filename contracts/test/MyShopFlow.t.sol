@@ -198,7 +198,7 @@ contract MyShopFlowTest is Test {
         bytes32 serialHash = keccak256(abi.encodePacked("SERIAL-001"));
         uint256 deadline = block.timestamp + 1 days;
         uint256 nonce = 42;
-        bytes memory sig = _signSerialPermit(itemId, buyer, serialHash, deadline, nonce);
+        bytes memory sig = _signSerialPermit(itemId, buyer, recipient, serialHash, deadline, nonce);
         bytes memory extra = abi.encode(serialHash, deadline, nonce, sig);
 
         vm.prank(buyer);
@@ -281,7 +281,7 @@ contract MyShopFlowTest is Test {
         return abi.encodePacked(r, s, v);
     }
 
-    function _signSerialPermit(uint256 itemId, address buyer_, bytes32 serialHash, uint256 deadline, uint256 nonce)
+    function _signSerialPermit(uint256 itemId, address buyer_, address recipient_, bytes32 serialHash, uint256 deadline, uint256 nonce)
         internal
         view
         returns (bytes memory)
@@ -289,10 +289,11 @@ contract MyShopFlowTest is Test {
         bytes32 structHash = keccak256(
             abi.encode(
                 keccak256(
-                    "SerialPermit(uint256 itemId,address buyer,bytes32 serialHash,uint256 deadline,uint256 nonce)"
+                    "SerialPermit(uint256 itemId,address buyer,address recipient,bytes32 serialHash,uint256 deadline,uint256 nonce)"
                 ),
                 itemId,
                 buyer_,
+                recipient_,
                 serialHash,
                 deadline,
                 nonce

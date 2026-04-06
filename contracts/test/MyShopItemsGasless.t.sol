@@ -115,7 +115,7 @@ contract MyShopItemsGaslessTest is Test {
         );
     }
 
-    function _signSerialPermit(uint256 itemId, address buyer_, bytes32 serialHash, uint256 deadline, uint256 nonce)
+    function _signSerialPermit(uint256 itemId, address buyer_, address recipient_, bytes32 serialHash, uint256 deadline, uint256 nonce)
         internal
         view
         returns (bytes memory)
@@ -123,10 +123,11 @@ contract MyShopItemsGaslessTest is Test {
         bytes32 structHash = keccak256(
             abi.encode(
                 keccak256(
-                    "SerialPermit(uint256 itemId,address buyer,bytes32 serialHash,uint256 deadline,uint256 nonce)"
+                    "SerialPermit(uint256 itemId,address buyer,address recipient,bytes32 serialHash,uint256 deadline,uint256 nonce)"
                 ),
                 itemId,
                 buyer_,
+                recipient_,
                 serialHash,
                 deadline,
                 nonce
@@ -163,8 +164,8 @@ contract MyShopItemsGaslessTest is Test {
     // ----------------------------------------------------------------
     // test_BuyGasless_ExplicitPayer
     // When payer != address(0), the explicit payer address is used for
-    // SerialPermit verification. With the recipient guard, recipient must
-    // equal the payer when payer != msg.sender.
+    // SerialPermit verification. The recipient is locked in the EIP-712
+    // signature, so only the intended recipient can receive the NFT.
     // ----------------------------------------------------------------
     function test_BuyGasless_ExplicitPayer() external {
         uint256 itemId = _addItem(true); // requiresSerial = true
@@ -172,7 +173,7 @@ contract MyShopItemsGaslessTest is Test {
         bytes32 serialHash = keccak256(abi.encodePacked("GASLESS-SERIAL-001"));
         uint256 deadline = block.timestamp + 1 hours;
         uint256 nonce = 0;
-        bytes memory sig = _signSerialPermit(itemId, eoa, serialHash, deadline, nonce);
+        bytes memory sig = _signSerialPermit(itemId, eoa, eoa, serialHash, deadline, nonce);
         bytes memory extraData = abi.encode(serialHash, deadline, nonce, sig);
 
         uint256 platformBefore = usdc.balanceOf(platformTreasury);
@@ -193,9 +194,10 @@ contract MyShopItemsGaslessTest is Test {
 
     // ----------------------------------------------------------------
     // test_BuyGasless_ExplicitPayer_RecipientMismatch_Reverts
-    // New guard: when payer != msg.sender, recipient must equal payer.
-    // This closes the nonce-grief vector — an attacker who holds a victim's
-    // permit and calls buyGasless(payer=victim, recipient=attacker) is rejected.
+    // Option B: recipient is locked in the EIP-712 SerialPermit signature.
+    // Permit signed for recipient=eoa; attacker calls with recipient=attacker
+    // → signature mismatch → InvalidSignature (not InvalidAddress).
+    // This closes the nonce-grief vector — attacker can't redirect the NFT.
     // ----------------------------------------------------------------
     function test_BuyGasless_ExplicitPayer_RecipientMismatch_Reverts() external {
         uint256 itemId = _addItem(true);
@@ -203,7 +205,8 @@ contract MyShopItemsGaslessTest is Test {
         bytes32 serialHash = keccak256(abi.encodePacked("GRIEF-SERIAL-001"));
         uint256 deadline = block.timestamp + 1 hours;
         uint256 nonce = 0;
-        bytes memory sig = _signSerialPermit(itemId, eoa, serialHash, deadline, nonce);
+        // Permit is signed with recipient=eoa
+        bytes memory sig = _signSerialPermit(itemId, eoa, eoa, serialHash, deadline, nonce);
         bytes memory extraData = abi.encode(serialHash, deadline, nonce, sig);
 
         address attacker = address(0xA77AC4);
@@ -211,9 +214,9 @@ contract MyShopItemsGaslessTest is Test {
         vm.prank(attacker);
         usdc.approve(address(items), type(uint256).max);
 
-        // Attacker sets recipient=attacker but payer=eoa (victim) → must revert
+        // Attacker sets recipient=attacker but permit locked recipient=eoa → sig mismatch
         vm.prank(attacker);
-        vm.expectRevert(MyShopItems.InvalidAddress.selector);
+        vm.expectRevert(MyShopItems.InvalidSignature.selector);
         items.buyGasless(itemId, 1, attacker, eoa, extraData);
 
         // Victim's nonce is untouched
@@ -221,10 +224,10 @@ contract MyShopItemsGaslessTest is Test {
     }
 
     // ----------------------------------------------------------------
-    // test_BuyGasless_ExplicitPayer_RecipientEqualsPayerBlocked
-    // If attacker is forced to set recipient=eoa (to satisfy the guard),
-    // they pay their own money but eoa receives the NFT — economically
-    // pointless for the attacker; the "grief" is eliminated.
+    // test_BuyGasless_ForcedRecipientEqualsPayer_AttackerPaysVictimReceives
+    // With Option B, permit locks recipient=eoa. Attacker can call with
+    // recipient=eoa (matching the permit) and pay themselves — but eoa gets
+    // the NFT they wanted. Economically pointless; attack is eliminated.
     // ----------------------------------------------------------------
     function test_BuyGasless_ForcedRecipientEqualsPayer_AttackerPaysVictimReceives() external {
         uint256 itemId = _addItem(true);
@@ -232,7 +235,8 @@ contract MyShopItemsGaslessTest is Test {
         bytes32 serialHash = keccak256(abi.encodePacked("GRIEF-SERIAL-002"));
         uint256 deadline = block.timestamp + 1 hours;
         uint256 nonce = 0;
-        bytes memory sig = _signSerialPermit(itemId, eoa, serialHash, deadline, nonce);
+        // Permit signed with recipient=eoa
+        bytes memory sig = _signSerialPermit(itemId, eoa, eoa, serialHash, deadline, nonce);
         bytes memory extraData = abi.encode(serialHash, deadline, nonce, sig);
 
         address attacker = address(0xA77AC4);
@@ -240,8 +244,7 @@ contract MyShopItemsGaslessTest is Test {
         vm.prank(attacker);
         usdc.approve(address(items), type(uint256).max);
 
-        // Attacker must set recipient=eoa to pass the guard.
-        // Result: attacker pays, eoa receives the NFT (victim is not harmed).
+        // Attacker calls with recipient=eoa (matching permit) — attacker pays, eoa gets NFT.
         vm.prank(attacker);
         items.buyGasless(itemId, 1, eoa, eoa, extraData);
 
@@ -278,7 +281,7 @@ contract MyShopItemsGaslessTest is Test {
         bytes32 serialHash = keccak256(abi.encodePacked("WRONG-SERIAL"));
         uint256 deadline = block.timestamp + 1 hours;
         uint256 nonce = 0;
-        bytes memory sig = _signSerialPermit(itemId, aaWallet, serialHash, deadline, nonce);
+        bytes memory sig = _signSerialPermit(itemId, aaWallet, eoa, serialHash, deadline, nonce);
         bytes memory extraData = abi.encode(serialHash, deadline, nonce, sig);
 
         // recipient=eoa to pass guard; will still revert on signature mismatch
@@ -297,7 +300,7 @@ contract MyShopItemsGaslessTest is Test {
         bytes32 serialHash = keccak256(abi.encodePacked("REPLAY-SERIAL"));
         uint256 deadline = block.timestamp + 1 hours;
         uint256 nonce = 0;
-        bytes memory sig = _signSerialPermit(itemId, eoa, serialHash, deadline, nonce);
+        bytes memory sig = _signSerialPermit(itemId, eoa, eoa, serialHash, deadline, nonce);
         bytes memory extraData = abi.encode(serialHash, deadline, nonce, sig);
 
         usdc.mint(aaWallet, 1_000_000_000);
@@ -313,12 +316,10 @@ contract MyShopItemsGaslessTest is Test {
     // ----------------------------------------------------------------
     // test_BuyGasless_PayerNonceConsumption_NowBlocked
     //
-    // Previously (before recipient guard), an attacker with victim's permit
-    // could call buyGasless(payer=victim, recipient=attacker) and consume
-    // the victim's nonce while receiving the NFT themselves.
-    //
-    // After adding the guard `require(recipient == effectivePayer when payer != msg.sender)`,
-    // this attack is blocked at the contract level.
+    // Option B: recipient is locked in the EIP-712 SerialPermit signature.
+    // Permit signed for recipient=eoa. Attacker calls buyGasless with
+    // recipient=attacker → signature mismatch → InvalidSignature.
+    // Victim's nonce is untouched — attack fully blocked on-chain.
     // ----------------------------------------------------------------
     function test_BuyGasless_PayerNonceConsumption_NowBlocked() external {
         uint256 itemId = _addItem(true);
@@ -326,7 +327,8 @@ contract MyShopItemsGaslessTest is Test {
         bytes32 serialHash = keccak256(abi.encodePacked("VICTIM-SERIAL-001"));
         uint256 deadline = block.timestamp + 1 hours;
         uint256 nonce = 42;
-        bytes memory sig = _signSerialPermit(itemId, eoa, serialHash, deadline, nonce);
+        // Permit signed with recipient=eoa
+        bytes memory sig = _signSerialPermit(itemId, eoa, eoa, serialHash, deadline, nonce);
         bytes memory extraData = abi.encode(serialHash, deadline, nonce, sig);
 
         address attacker = address(0xA77AC4);
@@ -334,9 +336,9 @@ contract MyShopItemsGaslessTest is Test {
         vm.prank(attacker);
         usdc.approve(address(items), type(uint256).max);
 
-        // Attack attempt: recipient=attacker, payer=eoa(victim) → now reverts
+        // Attack attempt: recipient=attacker, but permit locked recipient=eoa → sig mismatch
         vm.prank(attacker);
-        vm.expectRevert(MyShopItems.InvalidAddress.selector);
+        vm.expectRevert(MyShopItems.InvalidSignature.selector);
         items.buyGasless(itemId, 1, attacker, eoa, extraData);
 
         // Victim's nonce is untouched — attack fully blocked on-chain

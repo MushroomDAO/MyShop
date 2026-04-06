@@ -276,6 +276,9 @@ export async function startPermitServer({
         }
         const buyer = _getAddressParam(url, "buyer");
         const itemId = _getUintParam(url, "itemId", { min: 1n });
+        // recipient: optional — defaults to buyer (self-purchase). Pass explicitly for gifting.
+        const recipientParam = url.searchParams.get("recipient");
+        const recipient = recipientParam ? getAddress(recipientParam) : buyer;
         const deadline = _getDeadlineParam(url, "deadline");
         const nonce = await _resolveNonce(publicClient, itemsAddress, buyer, url.searchParams.get("nonce"));
 
@@ -317,13 +320,14 @@ export async function startPermitServer({
               SerialPermit: [
                 { name: "itemId", type: "uint256" },
                 { name: "buyer", type: "address" },
+                { name: "recipient", type: "address" },
                 { name: "serialHash", type: "bytes32" },
                 { name: "deadline", type: "uint256" },
                 { name: "nonce", type: "uint256" }
               ]
             },
             primaryType: "SerialPermit",
-            message: { itemId, buyer, serialHash, deadline, nonce }
+            message: { itemId, buyer, recipient, serialHash, deadline, nonce }
           });
         } catch (e) {
           // Signing failed — release the reserved nonce so it can be retried
@@ -360,6 +364,7 @@ export async function startPermitServer({
         _json(res, 200, {
           ok: true,
           buyer,
+          recipient,
           itemId: itemId.toString(),
           serial: serialResult.serial,
           serialHash,
@@ -430,7 +435,7 @@ export async function startPermitServer({
 
         // Parse POST body
         const body = await _readJsonBody(req);
-        const { itemId: itemIdRaw, buyerAddress: buyerRaw, quantity: quantityRaw, serialHash: serialHashParam } = body ?? {};
+        const { itemId: itemIdRaw, buyerAddress: buyerRaw, quantity: quantityRaw, serialHash: serialHashParam, recipient: recipientRaw } = body ?? {};
 
         if (!itemIdRaw) throw new HttpError({ status: 400, code: "missing_param", message: "Missing: itemId", details: { param: "itemId" } });
         if (!buyerRaw) throw new HttpError({ status: 400, code: "missing_param", message: "Missing: buyerAddress", details: { param: "buyerAddress" } });
@@ -462,7 +467,15 @@ export async function startPermitServer({
           serialHash = keccak256(toBytes(seed));
         }
 
-        const deadline = BigInt(Math.floor(Date.now() / 1000) + 300); // 5 minutes — short TTL limits nonce-grief attack window
+        // recipient: defaults to buyer (self-purchase). Caller may override for gifting.
+        let gaslessRecipient = buyer;
+        if (recipientRaw) {
+          try { gaslessRecipient = getAddress(String(recipientRaw)); } catch {
+            throw new HttpError({ status: 400, code: "invalid_param", message: "Invalid address: recipient", details: { param: "recipient" } });
+          }
+        }
+
+        const deadline = BigInt(Math.floor(Date.now() / 1000) + 300); // 5 minutes — short TTL
         const nonce = await _resolveNonce(publicClient, itemsAddress, buyer, null);
 
         const signature = await walletClients.serial.signTypedData({
@@ -471,13 +484,14 @@ export async function startPermitServer({
             SerialPermit: [
               { name: "itemId", type: "uint256" },
               { name: "buyer", type: "address" },
+              { name: "recipient", type: "address" },
               { name: "serialHash", type: "bytes32" },
               { name: "deadline", type: "uint256" },
               { name: "nonce", type: "uint256" }
             ]
           },
           primaryType: "SerialPermit",
-          message: { itemId, buyer, serialHash, deadline, nonce }
+          message: { itemId, buyer, recipient: gaslessRecipient, serialHash, deadline, nonce }
         });
 
         // Encode extraData (same format as /serial-permit)

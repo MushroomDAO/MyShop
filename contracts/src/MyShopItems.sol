@@ -468,15 +468,9 @@ contract MyShopItems {
         bytes calldata extraData
     ) external payable returns (uint256 firstTokenId) {
         address effectivePayer = payer == address(0) ? msg.sender : payer;
-        // When an explicit payer is set (AA/relayer scenario), the NFT must go to the payer
-        // themselves — not to an arbitrary recipient. This closes the nonce-grief vector:
-        // an attacker who submits a victim's permit via buyGasless(payer=victim) is forced to
-        // deliver the NFT to the victim, making the "attack" economically pointless
-        // (attacker pays; victim receives the item they wanted).
-        // Regular buy() still supports gifting (msg.sender pays, recipient differs).
-        if (effectivePayer != msg.sender) {
-            if (recipient != effectivePayer) revert InvalidAddress();
-        }
+        // recipient is included in the SerialPermit signature, so the Worker locks in
+        // the intended NFT destination at signing time. An attacker who holds a victim's
+        // permit cannot redirect the NFT to themselves without breaking the signature.
         return _buy(itemId, quantity, recipient, effectivePayer, extraData);
     }
 
@@ -522,7 +516,7 @@ contract MyShopItems {
 
         bytes32 serialHash = bytes32(0);
         if (item.requiresSerial) {
-            serialHash = _verifySerial(itemId, buyer, extraData);
+            serialHash = _verifySerial(itemId, buyer, recipient, extraData);
         }
 
         // CEI: update state before external calls to prevent reentrancy
@@ -647,7 +641,7 @@ contract MyShopItems {
         if (shopItemCount[shopId] >= limit) revert MaxItemsReached();
     }
 
-    function _verifySerial(uint256 itemId, address buyer, bytes calldata extraData)
+    function _verifySerial(uint256 itemId, address buyer, address recipient, bytes calldata extraData)
         internal
         returns (bytes32 serialHash)
     {
@@ -657,7 +651,7 @@ contract MyShopItems {
         serialHash = hash_;
         _useNonce(buyer, nonce);
         if (block.timestamp > deadline) revert SignatureExpired();
-        bytes32 digest = _hashTypedDataV4(_hashSerialPermit(itemId, buyer, serialHash, deadline, nonce));
+        bytes32 digest = _hashTypedDataV4(_hashSerialPermit(itemId, buyer, recipient, serialHash, deadline, nonce));
         if (_recover(digest, sig) != serialSigner) revert InvalidSignature();
     }
 
@@ -703,7 +697,7 @@ contract MyShopItems {
         );
     }
 
-    function _hashSerialPermit(uint256 itemId, address buyer, bytes32 serialHash, uint256 deadline, uint256 nonce)
+    function _hashSerialPermit(uint256 itemId, address buyer, address recipient, bytes32 serialHash, uint256 deadline, uint256 nonce)
         internal
         pure
         returns (bytes32)
@@ -711,10 +705,11 @@ contract MyShopItems {
         return keccak256(
             abi.encode(
                 keccak256(
-                    "SerialPermit(uint256 itemId,address buyer,bytes32 serialHash,uint256 deadline,uint256 nonce)"
+                    "SerialPermit(uint256 itemId,address buyer,address recipient,bytes32 serialHash,uint256 deadline,uint256 nonce)"
                 ),
                 itemId,
                 buyer,
+                recipient,
                 serialHash,
                 deadline,
                 nonce
