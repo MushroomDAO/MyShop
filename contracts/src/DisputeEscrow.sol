@@ -47,6 +47,7 @@ contract DisputeEscrow is IJuryCallback {
     error ZeroAmount();
     error EvidenceTooLarge();
     error TransferFailed();
+    error IncorrectEthAmount();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -66,9 +67,10 @@ contract DisputeEscrow is IJuryCallback {
     }
 
     /// @notice Buyer opens a dispute for a purchase still within the dispute window.
-    ///         The buyer must have pre-approved this contract for payToken amount.
+    ///         For ERC20 purchases: buyer must pre-approve this contract for `payToken` `amount`.
+    ///         For ETH purchases: buyer must send exactly `amount` as msg.value.
     /// @param purchaseId keccak256(abi.encode(itemId, firstTokenId, buyer, purchaseTimestamp))
-    /// @param payToken ERC20 token address (must match original purchase)
+    /// @param payToken ERC20 token address, or address(0) for ETH (must match original purchase)
     /// @param amount Amount to escrow (typically the purchase price)
     /// @param shopTreasury Shop's treasury (receives funds if shop wins)
     /// @param evidence IPFS CID string of the evidence package (<=1024 bytes)
@@ -78,7 +80,7 @@ contract DisputeEscrow is IJuryCallback {
         uint256 amount,
         address shopTreasury,
         string calldata evidence
-    ) external returns (bytes32 disputeId) {
+    ) external payable returns (bytes32 disputeId) {
         if (amount == 0) revert ZeroAmount();
         if (purchaseDisputed[purchaseId]) revert DisputeAlreadyOpen();
         if (!itemsContract.isInDisputeWindow(purchaseId)) revert PurchaseNotInDisputeWindow();
@@ -97,8 +99,13 @@ contract DisputeEscrow is IJuryCallback {
             status: DisputeStatus.Open
         });
 
-        // Pull funds into escrow
-        if (payToken != address(0)) {
+        // Pull funds into escrow — state is written first (CEI pattern)
+        if (payToken == address(0)) {
+            // ETH dispute: caller must send exactly `amount` as msg.value
+            if (msg.value != amount) revert IncorrectEthAmount();
+        } else {
+            // ERC20 dispute: no ETH should be sent
+            if (msg.value != 0) revert IncorrectEthAmount();
             bool ok = IERC20(payToken).transferFrom(msg.sender, address(this), amount);
             if (!ok) revert TransferFailed();
         }

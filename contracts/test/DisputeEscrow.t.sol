@@ -288,4 +288,101 @@ contract DisputeEscrowTest is Test {
         vm.expectRevert(DisputeEscrow.DisputeNotOpen.selector);
         escrow.cancelDispute(disputeId);
     }
+
+    // -----------------------------------------------------------------------
+    // openDispute — ETH happy path: msg.value == amount escrowed
+    // -----------------------------------------------------------------------
+
+    function test_openDispute_eth_success() external {
+        uint256 ethAmount = 1 ether;
+        vm.deal(buyer, ethAmount);
+
+        vm.prank(buyer);
+        bytes32 disputeId = escrow.openDispute{value: ethAmount}(
+            PURCHASE_ID, address(0), ethAmount, shopTreasury, EVIDENCE
+        );
+
+        assertEq(address(escrow).balance, ethAmount);
+        assertEq(buyer.balance, 0);
+
+        (address dBuyer,,address dToken, uint256 dAmount,,, DisputeEscrow.DisputeStatus dStatus) =
+            escrow.disputes(disputeId);
+        assertEq(dBuyer, buyer);
+        assertEq(dToken, address(0));
+        assertEq(dAmount, ethAmount);
+        assertEq(uint8(dStatus), uint8(DisputeEscrow.DisputeStatus.Open));
+    }
+
+    // -----------------------------------------------------------------------
+    // openDispute — ETH: incorrect msg.value reverts with IncorrectEthAmount
+    // -----------------------------------------------------------------------
+
+    function test_openDispute_eth_reverts_incorrectValue() external {
+        uint256 ethAmount = 1 ether;
+        vm.deal(buyer, ethAmount);
+
+        vm.prank(buyer);
+        vm.expectRevert(DisputeEscrow.IncorrectEthAmount.selector);
+        escrow.openDispute{value: ethAmount / 2}(
+            PURCHASE_ID, address(0), ethAmount, shopTreasury, EVIDENCE
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // openDispute — ERC20: sending ETH reverts with IncorrectEthAmount
+    // -----------------------------------------------------------------------
+
+    function test_openDispute_erc20_reverts_unexpectedEth() external {
+        vm.deal(buyer, 1 ether);
+
+        vm.prank(buyer);
+        vm.expectRevert(DisputeEscrow.IncorrectEthAmount.selector);
+        escrow.openDispute{value: 1 ether}(
+            PURCHASE_ID, address(usdc), AMOUNT, shopTreasury, EVIDENCE
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // onTaskFinalized — ETH dispute: buyer wins → refunded in ETH
+    // -----------------------------------------------------------------------
+
+    function test_onTaskFinalized_eth_buyerWins() external {
+        uint256 ethAmount = 1 ether;
+        vm.deal(buyer, ethAmount);
+
+        vm.prank(buyer);
+        bytes32 disputeId = escrow.openDispute{value: ethAmount}(
+            PURCHASE_ID, address(0), ethAmount, shopTreasury, EVIDENCE
+        );
+
+        uint256 buyerBefore = buyer.balance;
+
+        vm.prank(juryAddr);
+        escrow.onTaskFinalized(disputeId, 80, true);
+
+        assertEq(buyer.balance, buyerBefore + ethAmount);
+        assertEq(address(escrow).balance, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // onTaskFinalized — ETH dispute: shop wins → shopTreasury gets ETH
+    // -----------------------------------------------------------------------
+
+    function test_onTaskFinalized_eth_shopWins() external {
+        uint256 ethAmount = 1 ether;
+        vm.deal(buyer, ethAmount);
+
+        vm.prank(buyer);
+        bytes32 disputeId = escrow.openDispute{value: ethAmount}(
+            PURCHASE_ID, address(0), ethAmount, shopTreasury, EVIDENCE
+        );
+
+        uint256 shopBefore = shopTreasury.balance;
+
+        vm.prank(juryAddr);
+        escrow.onTaskFinalized(disputeId, 20, false);
+
+        assertEq(shopTreasury.balance, shopBefore + ethAmount);
+        assertEq(address(escrow).balance, 0);
+    }
 }
