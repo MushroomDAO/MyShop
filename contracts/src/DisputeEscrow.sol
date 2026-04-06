@@ -72,7 +72,7 @@ contract DisputeEscrow is IJuryCallback {
     /// @param purchaseId keccak256(abi.encode(itemId, firstTokenId, buyer, purchaseTimestamp))
     /// @param payToken ERC20 token address, or address(0) for ETH (must match original purchase)
     /// @param amount Amount to escrow (typically the purchase price)
-    /// @param shopTreasury Shop's treasury (receives funds if shop wins)
+    /// @param shopTreasury Shop's treasury (receives funds if shop wins); must be non-zero
     /// @param evidence IPFS CID string of the evidence package (<=1024 bytes)
     function openDispute(
         bytes32 purchaseId,
@@ -82,6 +82,7 @@ contract DisputeEscrow is IJuryCallback {
         string calldata evidence
     ) external payable returns (bytes32 disputeId) {
         if (amount == 0) revert ZeroAmount();
+        if (shopTreasury == address(0)) revert InvalidAddress();
         if (purchaseDisputed[purchaseId]) revert DisputeAlreadyOpen();
         if (!itemsContract.isInDisputeWindow(purchaseId)) revert PurchaseNotInDisputeWindow();
         if (bytes(evidence).length > MAX_EVIDENCE_SIZE) revert EvidenceTooLarge();

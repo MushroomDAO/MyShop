@@ -290,6 +290,16 @@ contract DisputeEscrowTest is Test {
     }
 
     // -----------------------------------------------------------------------
+    // openDispute — revert on zero shopTreasury
+    // -----------------------------------------------------------------------
+
+    function test_openDispute_reverts_zeroShopTreasury() external {
+        vm.prank(buyer);
+        vm.expectRevert(DisputeEscrow.InvalidAddress.selector);
+        escrow.openDispute(PURCHASE_ID, address(usdc), AMOUNT, address(0), EVIDENCE);
+    }
+
+    // -----------------------------------------------------------------------
     // openDispute — ETH happy path: msg.value == amount escrowed
     // -----------------------------------------------------------------------
 
