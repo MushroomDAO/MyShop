@@ -19,6 +19,12 @@ contract TokenBalanceValidator is IEligibilityValidator {
         if (validatorData.length < 64) return false; // malformed data → fail closed
         (address token, uint256 minAmount) = abi.decode(validatorData, (address, uint256));
         if (token == address(0)) return false; // misconfigured → fail closed
-        return IERC20(token).balanceOf(buyer) >= minAmount;
+        // Defensively call balanceOf: if the token contract reverts (e.g. non-standard or selfdestruct),
+        // treat as ineligible (fail-closed) rather than propagating the revert into buy().
+        try IERC20(token).balanceOf(buyer) returns (uint256 bal) {
+            return bal >= minAmount;
+        } catch {
+            return false;
+        }
     }
 }

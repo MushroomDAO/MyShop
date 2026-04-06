@@ -63,7 +63,13 @@ export async function rewardBuyerXpnts({ buyer, purchaseId, quantity, chain, rpc
     return null;
   }
 
-  const amount = BigInt(rewardAmountRaw);
+  let amount;
+  try {
+    amount = BigInt(rewardAmountRaw);
+  } catch {
+    console.error(`[xpntsReward] Invalid XPNTS_REWARD_AMOUNT: ${rewardAmountRaw}`);
+    return null;
+  }
 
   try {
     const account = privateKeyToAccount(signerKey);

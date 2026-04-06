@@ -267,6 +267,25 @@ contract EligibilityValidatorsTest is Test {
     // Whitelist enforcement
     // ─────────────────────────────────────────────────────────────────────────
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Revert-safety: balanceOf reverts must not propagate into buy()
+    // ─────────────────────────────────────────────────────────────────────────
+
+    function test_sbtValidator_returnsFalse_whenBalanceOfReverts() external {
+        // A contract with no balanceOf → any call reverts → validator must return false, not revert
+        address reverter = address(new RevertingContract());
+        bytes memory data = abi.encode(reverter, uint256(1));
+        bool result = sbtValidator.checkEligibility(buyer, recipient, 1, SHOP_ID, 1, data, "");
+        assertFalse(result);
+    }
+
+    function test_tokenValidator_returnsFalse_whenBalanceOfReverts() external {
+        address reverter = address(new RevertingContract());
+        bytes memory data = abi.encode(reverter, uint256(1 ether));
+        bool result = tokenValidator.checkEligibility(buyer, recipient, 1, SHOP_ID, 1, data, "");
+        assertFalse(result);
+    }
+
     function test_addItem_reverts_whenValidatorNotWhitelisted() external {
         SBTHolderValidator unwhitelisted = new SBTHolderValidator();
         bytes memory data = abi.encode(address(sbt), uint256(1));
@@ -296,5 +315,12 @@ contract EligibilityValidatorsTest is Test {
         vm.prank(community);
         vm.expectRevert(MyShopItems.ValidatorNotAllowed.selector);
         items.addItem(p);
+    }
+}
+
+/// @dev A contract whose balanceOf always reverts — used to verify fail-closed try/catch in validators.
+contract RevertingContract {
+    function balanceOf(address) external pure returns (uint256) {
+        revert("always reverts");
     }
 }

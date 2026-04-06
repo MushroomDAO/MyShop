@@ -22,7 +22,12 @@ contract SBTHolderValidator is IEligibilityValidator {
         if (validatorData.length < 64) return false; // malformed data → fail closed
         (address nftContract, uint256 minBalance) = abi.decode(validatorData, (address, uint256));
         if (nftContract == address(0)) return false; // misconfigured → fail closed (not open)
-        uint256 bal = IERC721Balance(nftContract).balanceOf(buyer);
-        return bal >= minBalance;
+        // Defensively call balanceOf: if the NFT contract reverts (e.g. non-standard or selfdestruct),
+        // treat as ineligible (fail-closed) rather than propagating the revert into buy().
+        try IERC721Balance(nftContract).balanceOf(buyer) returns (uint256 bal) {
+            return bal >= minBalance;
+        } catch {
+            return false;
+        }
     }
 }
