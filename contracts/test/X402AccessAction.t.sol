@@ -26,11 +26,13 @@ contract X402AccessActionTest is Test {
     X402AccessAction internal action;
     MockAccessNFT internal nft;
 
+    // trustedCaller is this test contract (address(this)), so _exec() calls work.
     address internal recipient = address(0xBEEF);
     string  internal resourceUri = "https://api.example.com/resource/42";
 
     function setUp() external {
-        action = new X402AccessAction();
+        // Pass address(this) as the trustedCaller so test helper _exec() is accepted.
+        action = new X402AccessAction(address(this));
         nft    = new MockAccessNFT();
     }
 
@@ -40,6 +42,7 @@ contract X402AccessActionTest is Test {
         return abi.encode(nft_, uri);
     }
 
+    /// @dev Call execute() as address(this) — which is the trustedCaller.
     function _exec(address recipient_, uint256 quantity, bytes memory data) internal {
         action.execute(address(0), recipient_, 0, 0, quantity, data, "");
     }
@@ -83,6 +86,33 @@ contract X402AccessActionTest is Test {
         _exec(recipient, 1, badData);
     }
 
+    // ── test_Unauthorized_DirectCall ───────────────────────────────────────────
+
+    /// @dev A non-trusted caller cannot invoke execute() — payment bypass is blocked.
+    function test_Unauthorized_DirectCall() external {
+        address attacker = address(0xDEAD);
+        vm.prank(attacker);
+        vm.expectRevert(X402AccessAction.Unauthorized.selector);
+        action.execute(address(0), recipient, 0, 0, 1, _data(address(nft), resourceUri), "");
+    }
+
+    // ── test_EmptyActionData_Reverts ───────────────────────────────────────────
+
+    /// @dev Empty actionData must revert, not silently no-op.
+    function test_EmptyActionData_Reverts() external {
+        vm.expectRevert(X402AccessAction.EmptyActionData.selector);
+        _exec(recipient, 1, "");
+    }
+
+    // ── test_ZeroAddressNFT_Reverts ────────────────────────────────────────────
+
+    /// @dev actionData with address(0) for NFT contract must be rejected.
+    function test_ZeroAddressNFT_Reverts() external {
+        bytes memory badData = abi.encode(address(0), resourceUri);
+        vm.expectRevert(X402AccessAction.InvalidNFTContract.selector);
+        _exec(recipient, 1, badData);
+    }
+
     // ── test_x402_singleMint ───────────────────────────────────────────────────
 
     /// @dev quantity=1 mints exactly one token and emits one X402AccessGranted event.
@@ -117,7 +147,7 @@ contract X402AccessActionTest is Test {
 
     // ── test_x402_quantityZeroDefaultsToOne ───────────────────────────────────
 
-    /// @dev quantity=0 is treated as 1 — exactly one token minted.
+    /// @dev quantity=0 is treated as 1 — exactly one token minted (defensive guard).
     function test_x402_quantityZeroDefaultsToOne() external {
         _exec(recipient, 0, _data(address(nft), resourceUri));
 
@@ -127,7 +157,8 @@ contract X402AccessActionTest is Test {
 
     // ── test_x402_resourceUriInEvent ──────────────────────────────────────────
 
-    /// @dev The resourceUri passed in actionData is faithfully forwarded in the event.
+    /// @dev The resourceUri passed in actionData is faithfully forwarded in the event
+    ///      AND used as the NFT tokenURI so the NFT carries meaningful metadata.
     function test_x402_resourceUriInEvent() external {
         string memory specificUri = "https://api.example.com/premium/99";
 
@@ -135,5 +166,21 @@ contract X402AccessActionTest is Test {
         emit X402AccessAction.X402AccessGranted(recipient, address(nft), 1, specificUri);
 
         _exec(recipient, 1, _data(address(nft), specificUri));
+    }
+
+    // ── test_trustedCaller_isImmutable ────────────────────────────────────────
+
+    /// @dev Verify the trustedCaller is correctly set at construction time.
+    function test_trustedCaller_isImmutable() external view {
+        assertEq(action.trustedCaller(), address(this));
+    }
+
+    // ── test_RevertingNFT_propagatesRevert ────────────────────────────────────
+
+    /// @dev If the NFT contract's mint reverts, the whole execute() reverts too.
+    function test_RevertingNFT_propagatesRevert() external {
+        RevertingNFT bad = new RevertingNFT();
+        vm.expectRevert();
+        _exec(recipient, 1, _data(address(bad), resourceUri));
     }
 }
