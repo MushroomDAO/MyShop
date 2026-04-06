@@ -137,6 +137,8 @@ contract DisputeEscrow is IJuryCallback {
     /// @notice Owner can cancel a stuck dispute and return funds to buyer.
     function cancelDispute(bytes32 disputeId) external onlyOwner {
         Dispute storage d = disputes[disputeId];
+        // Check None first so a phantom disputeId gets DisputeNotFound, not DisputeNotOpen
+        if (d.status == DisputeStatus.None) revert DisputeNotFound();
         if (d.status != DisputeStatus.Open) revert DisputeNotOpen();
         d.status = DisputeStatus.Cancelled;
         _release(d.payToken, d.buyer, d.amount);

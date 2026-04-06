@@ -299,6 +299,18 @@ contract DisputeEscrowTest is Test {
     }
 
     // -----------------------------------------------------------------------
+    // cancelDispute — phantom disputeId must revert DisputeNotFound, not DisputeNotOpen
+    // -----------------------------------------------------------------------
+
+    function test_cancelDispute_reverts_phantomDispute() external {
+        bytes32 randomId = keccak256("never-opened-dispute");
+        // Must be DisputeNotFound, not DisputeNotOpen — otherwise caller can't distinguish
+        // between "dispute doesn't exist" and "dispute exists but is resolved/cancelled"
+        vm.expectRevert(DisputeEscrow.DisputeNotFound.selector);
+        escrow.cancelDispute(randomId);
+    }
+
+    // -----------------------------------------------------------------------
     // openDispute — revert on zero shopTreasury
     // -----------------------------------------------------------------------
 
