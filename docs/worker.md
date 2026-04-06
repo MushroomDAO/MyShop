@@ -68,18 +68,23 @@ pnpm run dev
 
 ### SerialPermit（购买前）
 
-`GET /serial-permit?itemId=&buyer=&serial=&deadline=&nonce=`
+`GET /serial-permit?itemId=&buyer=&serial=&deadline=&nonce=&recipient=`
 
 - `serial`：原始串号字符串（服务端会 `keccak256(serial)` 得到 `serialHash`）
-- `deadline`：uint256 时间戳
+- `deadline`：uint256 时间戳（有效期建议短，默认服务端生成 5 分钟 TTL）
 - `nonce`：
   - 不填：服务端会从合约 `usedNonces(buyer, i)` 自动找一个未用的 nonce（0..999）
   - 填：用你提供的 nonce
+- `recipient`（可选）：NFT 接收地址。不填默认等于 `buyer`（自购）。
+  - 如需赠送/代购，明确填写不同于 buyer 的 recipient
+  - **recipient 被纳入 EIP-712 签名，一旦签署不可更改**（见下方安全设计说明）
 
 返回里会给出：
 
 - `signature`（EIP-712 签名）
 - `extraData`（已编码好的 `abi.encode(serialHash,deadline,nonce,sig)`，可直接作为 `buy(..., extraData)` 参数）
+
+> **安全设计（Option B）**：`recipient` 字段被包含在 EIP-712 `SerialPermit` 结构体中，合约验签时会校验传入的 `recipient` 是否与签名内容一致。任何人持有 permit 但将 `recipient` 改为其他地址，签名验证都会失败（`InvalidSignature`）。这从根本上杜绝了"nonce 劫持"攻击（见下方威胁模型）。
 
 #### 限流
 
