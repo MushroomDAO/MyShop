@@ -450,6 +450,10 @@ export async function startPermitServer({
         const quantity = BigInt(String(quantityRaw));
         if (quantity < 1n) throw new HttpError({ status: 400, code: "invalid_param", message: "quantity must be >= 1", details: { param: "quantity" } });
 
+        // Resolve nonce once; reused both in serialHash seed (when auto-generated)
+        // and in the signed permit to avoid a second RPC round-trip.
+        const nonce = await _resolveNonce(publicClient, itemsAddress, buyer, null);
+
         let serialHash;
         if (serialHashParam) {
           if (!/^0x[0-9a-fA-F]{64}$/.test(String(serialHashParam))) {
@@ -457,12 +461,15 @@ export async function startPermitServer({
           }
           serialHash = String(serialHashParam);
         } else {
-          const seed = `myshop:gaslessPermit:v1:${buyer}:${itemId.toString()}`;
+          // Include nonce in the seed to ensure each purchase gets a unique serialHash.
+          // Without nonce, a buyer purchasing the same item twice gets the same serialHash
+          // for both permits; the second purchase would revert on-chain because
+          // usedSerials[serialHash] is already consumed by the first transaction.
+          const seed = `myshop:gaslessPermit:v1:${buyer}:${itemId.toString()}:${nonce.toString()}`;
           serialHash = keccak256(toBytes(seed));
         }
 
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
-        const nonce = await _resolveNonce(publicClient, itemsAddress, buyer, null);
 
         const signature = await walletClients.serial.signTypedData({
           domain: { name: "MyShop", version: "1", chainId: domainChainId, verifyingContract: getAddress(itemsAddress) },
@@ -531,14 +538,14 @@ export async function startPermitServer({
 
       // W17: gasless submit — POST /gasless-submit
       // Accepts a signed UserOp and submits it to the ERC-4337 bundler.
+      // handleGaslessSubmit returns true on success (200), false on any error (400/503).
       if (url.pathname === "/gasless-submit") {
         _requireMethod(req, ["POST"]);
-        await handleGaslessSubmit(req, res, {
+        const ok = await handleGaslessSubmit(req, res, {
           chainId: domainChainId,
-          bundlerUrl: bundlerUrl || null,
-          paymasterUrl: paymasterUrl || null
+          bundlerUrl: bundlerUrl || null
         });
-        stats.okTotal += 1;
+        if (ok) stats.okTotal += 1;
         return;
       }
 
