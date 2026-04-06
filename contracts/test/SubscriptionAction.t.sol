@@ -24,7 +24,8 @@ contract SubscriptionActionTest is Test {
     address internal recipient = address(0xF00D);
 
     function setUp() external {
-        action = new SubscriptionAction();
+        // Pass address(this) as itemsContract so the test contract can call execute() directly
+        action = new SubscriptionAction(address(this));
         nft = new MockSimpleNFT();
     }
 
@@ -198,6 +199,42 @@ contract SubscriptionActionTest is Test {
             _contains(uri, "expiresAt"),
             "tokenURI should contain the 'expiresAt' key"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Security: unauthorized caller cannot call execute()
+    // -----------------------------------------------------------------------
+
+    function test_execute_reverts_whenCalledByNonItemsContract() external {
+        address attacker = address(0xDEAD);
+        vm.prank(attacker);
+        vm.expectRevert(SubscriptionAction.Unauthorized.selector);
+        action.execute(buyer, recipient, 0, 0, 1, _actionData(30 days), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // Security: malformed actionData (too short) reverts with InvalidActionData
+    // -----------------------------------------------------------------------
+
+    function test_execute_reverts_whenActionDataTooShort() external {
+        vm.expectRevert(SubscriptionAction.InvalidActionData.selector);
+        action.execute(buyer, recipient, 0, 0, 1, bytes(""), "");
+    }
+
+    function test_execute_reverts_whenActionDataPartial() external {
+        vm.expectRevert(SubscriptionAction.InvalidActionData.selector);
+        // Only 32 bytes — not enough for (address, uint256)
+        action.execute(buyer, recipient, 0, 0, 1, abi.encode(address(nft)), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // Security: zero nftContract in actionData reverts
+    // -----------------------------------------------------------------------
+
+    function test_execute_reverts_whenNftContractIsZero() external {
+        bytes memory badData = abi.encode(address(0), uint256(30 days));
+        vm.expectRevert(SubscriptionAction.InvalidActionData.selector);
+        action.execute(buyer, recipient, 0, 0, 1, badData, "");
     }
 
     // --- helpers ---

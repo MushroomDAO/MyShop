@@ -8,7 +8,16 @@ interface IERC721Mintable {
 /// @notice Mints a subscription NFT with an expiry timestamp encoded in tokenURI.
 ///         actionData = abi.encode(address nftContract, uint256 durationSeconds)
 ///         Duration: e.g. 30 days = 2592000
+///
+///         Security: only the whitelisted MyShopItems contract may call execute().
+///         The caller restriction is enforced by requiring msg.sender == itemsContract.
 contract SubscriptionAction {
+    /// @notice The MyShopItems contract that is allowed to call execute().
+    address public immutable itemsContract;
+
+    error Unauthorized();
+    error InvalidActionData();
+
     event SubscriptionGranted(
         address indexed subscriber,
         address indexed nftContract,
@@ -16,6 +25,13 @@ contract SubscriptionAction {
         uint256 expiresAt
     );
 
+    constructor(address itemsContract_) {
+        require(itemsContract_ != address(0), "SubscriptionAction: zero address");
+        itemsContract = itemsContract_;
+    }
+
+    /// @notice Called by MyShopItems.buy() after a successful purchase.
+    ///         Restricted to itemsContract only — cannot be called directly.
     function execute(
         address /*buyer*/,
         address recipient,
@@ -25,7 +41,11 @@ contract SubscriptionAction {
         bytes calldata actionData,
         bytes calldata /*extraData*/
     ) external payable {
+        if (msg.sender != itemsContract) revert Unauthorized();
+        // Guard: actionData must encode at least (address, uint256) = 64 bytes
+        if (actionData.length < 64) revert InvalidActionData();
         (address nftContract, uint256 durationSeconds) = abi.decode(actionData, (address, uint256));
+        if (nftContract == address(0)) revert InvalidActionData();
         uint256 expiresAt = block.timestamp + durationSeconds;
         if (quantity == 0) quantity = 1;
         for (uint256 i = 0; i < quantity; i++) {
