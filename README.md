@@ -1,5 +1,6 @@
 # MyShop
 
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 一个“链上协议 + 轻服务”的最小可用电商/门票/权益售卖系统：
 
 - **On-chain**：`MyShops`（店铺注册与协议配置）+ `MyShopItems`（上架与原子购买 `buy()`）
@@ -367,3 +368,7 @@ curl "http://localhost:8788/purchases?itemId=1&limit=20&include=enrich"
 - **一键演示 & 最小前端**
   - 一条命令本地部署 + 购买 + 输出 Purchased payload（可选附带 Query API 校验）
   - Vite 最小前端：直连合约完成 registerShop / addItem / buy（可选对接 Worker）
+
+## License
+
+Licensed under the [Apache License, Version 2.0](https://opensource.org/licenses/Apache-2.0). See [LICENSE](./LICENSE) for details.
