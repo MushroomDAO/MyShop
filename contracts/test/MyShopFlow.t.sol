@@ -6,9 +6,9 @@ import {MyShops} from "../src/MyShops.sol";
 import {MyShopItems} from "../src/MyShopItems.sol";
 import {TransferRewardAction} from "../src/actions/TransferRewardAction.sol";
 import {MockRegistry} from "../src/mocks/MockRegistry.sol";
-import {MockERC20Mintable} from "../src/mocks/MockERC20Mintable.sol";
+import {MockERC20Mintable} from "./mocks/MockERC20Mintable.sol";
 import {MockCommunityNFT} from "../src/mocks/MockCommunityNFT.sol";
-import {MockMintTokenAction} from "../src/mocks/MockMintTokenAction.sol";
+import {MockMintTokenAction} from "./mocks/MockMintTokenAction.sol";
 
 contract MyShopFlowTest is Test {
     bytes32 internal constant ROLE_COMMUNITY = keccak256("COMMUNITY");
@@ -49,15 +49,17 @@ contract MyShopFlowTest is Test {
         shops = new MyShops(address(registry), platformTreasury, address(apnts), 100 ether, 300);
         items = new MyShopItems(address(shops), riskSigner, serialSigner);
 
-        // MS-1: 奖励从社区 owner 金库 transferFrom 发放,MyShop 无任何 mint 权
-        action = new TransferRewardAction(address(apnts), community);
-        action.setItems(address(items));
-        items.setActionAllowed(address(action), true);
-
         registry.setHasRole(ROLE_COMMUNITY, community, true);
 
         vm.prank(community);
-        shops.registerShop(communityTreasury, bytes32(uint256(1)));
+        uint256 shopId = shops.registerShop(communityTreasury, bytes32(uint256(1)));
+
+        // MS-1: 奖励从社区 owner 金库 transferFrom 发放,MyShop 无任何 mint 权;
+        // action 绑定 shopId,items 由金库 one-shot 设置
+        action = new TransferRewardAction(address(apnts), community, shopId);
+        vm.prank(community);
+        action.setItems(address(items));
+        items.setActionAllowed(address(action), true);
 
         apnts.mint(community, 10_000 ether);
         apnts.mint(buyer, 10_000 ether);
@@ -177,6 +179,62 @@ contract MyShopFlowTest is Test {
         uint256 apntsAfter = apnts.balanceOf(recipient);
         assertEq(apntsAfter - apntsBefore, 50 ether);
         assertEq(treasuryApntsBefore - apnts.balanceOf(community), 50 ether);
+    }
+
+    function test_buy_reverts_whenTreasuryAllowanceExhausted() external {
+        vm.prank(community);
+        uint256 itemId = _addItem(false, 0, 0, 0, bytes(""));
+
+        // 金库改为精确额度:恰好够一次发放
+        vm.prank(community);
+        apnts.approve(address(action), 50 ether);
+
+        vm.prank(buyer);
+        items.buy(itemId, 1, recipient, "");
+        assertEq(apnts.allowance(community, address(action)), 0);
+
+        // 额度耗尽后,下一次购买 revert(buy 原子性:整笔购买失败)
+        vm.prank(buyer);
+        vm.expectRevert(bytes("ALLOWANCE"));
+        items.buy(itemId, 1, recipient, "");
+    }
+
+    function test_buy_reverts_whenActionBoundToOtherShop() external {
+        // H1 回归:另一个社区的店铺把同一个(全局 allowlist 里的)action 挂上自己商品,
+        // 购买时 execute 校验 shopId 不匹配,无法从 shop1 金库薅积分
+        address community2 = address(0xD00D);
+        address community2Treasury = address(0xD00E);
+        registry.setHasRole(ROLE_COMMUNITY, community2, true);
+
+        vm.prank(community2);
+        uint256 shop2Id = shops.registerShop(community2Treasury, bytes32(uint256(2)));
+        assertEq(shop2Id, 2);
+
+        apnts.mint(community2, 1_000 ether);
+        vm.startPrank(community2);
+        apnts.approve(address(items), type(uint256).max);
+        uint256 itemId = items.addItem(
+            MyShopItems.AddItemParams({
+                shopId: shop2Id,
+                payToken: address(usdc),
+                unitPrice: 1000,
+                nftContract: address(nft),
+                soulbound: true,
+                tokenURI: "ipfs://token",
+                action: address(action),
+                actionData: abi.encode(uint256(10_000 ether)),
+                requiresSerial: false,
+                maxItems: 0,
+                deadline: 0,
+                nonce: 0,
+                signature: bytes("")
+            })
+        );
+        vm.stopPrank();
+
+        vm.prank(buyer);
+        vm.expectRevert(TransferRewardAction.ShopNotAllowed.selector);
+        items.buy(itemId, 1, recipient, "");
     }
 
     function test_buy_requiresSerial_whenItemConfigured() external {

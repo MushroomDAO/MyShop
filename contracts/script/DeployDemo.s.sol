@@ -8,7 +8,7 @@ import {MyShops} from "../src/MyShops.sol";
 import {MyShopItems} from "../src/MyShopItems.sol";
 import {TransferRewardAction} from "../src/actions/TransferRewardAction.sol";
 import {MockRegistry} from "../src/mocks/MockRegistry.sol";
-import {MockERC20Mintable} from "../src/mocks/MockERC20Mintable.sol";
+import {MockERC20Mintable} from "../test/mocks/MockERC20Mintable.sol";
 import {MockCommunityNFT} from "../src/mocks/MockCommunityNFT.sol";
 
 contract DeployDemo is Script {
@@ -38,14 +38,15 @@ contract DeployDemo is Script {
         MyShops shops = new MyShops(address(registry), platformTreasury, address(apnts), 100 ether, 300);
         MyShopItems items = new MyShopItems(address(shops), riskSigner, serialSigner);
 
-        // MS-1: 奖励从金库(demo 中即 deployer=社区 owner)transferFrom 发放,无 mint 权
-        TransferRewardAction action = new TransferRewardAction(address(apnts), deployer);
-        action.setItems(address(items));
-        items.setActionAllowed(address(action), true);
-
         registry.setHasRole(ROLE_COMMUNITY, deployer, true);
 
         uint256 shopId = shops.registerShop(deployer, bytes32(uint256(1)));
+
+        // MS-1: 奖励从金库(demo 中即 deployer=社区 owner)transferFrom 发放,无 mint 权;
+        // action 绑定 shopId,items 由金库 one-shot 设置
+        TransferRewardAction action = new TransferRewardAction(address(apnts), deployer, shopId);
+        action.setItems(address(items));
+        items.setActionAllowed(address(action), true);
 
         apnts.mint(deployer, 1000 ether);
         apnts.approve(address(items), type(uint256).max);
