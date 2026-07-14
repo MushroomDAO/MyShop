@@ -167,6 +167,68 @@ contract DeploySepoliaSmokeTest is Test, DeploySepolia {
         this.deployCoreExternal(p);
     }
 
+    /// run() 级冒烟:覆盖 env 解析(envUint/envAddress/envOr 链)与 _printSummary。
+    /// 三个阶段必须按序放在同一个用例里——vm.setEnv 是进程级且无法 unset,
+    /// 拆开会因测试执行顺序不定而 flaky(阶段 1 依赖 REGISTRY_ADDRESS 尚未被设置)。
+    function test_Run_EnvParsing_DefaultsAndOverrides() external {
+        uint256 deployerPk = 0x5EED;
+        address deployer = vm.addr(deployerPk);
+
+        vm.setEnv("DEPLOYER_PRIVATE_KEY", vm.toString(bytes32(deployerPk)));
+        vm.setEnv("COMMUNITY_NFT_ADDRESS", vm.toString(address(nft)));
+        vm.setEnv("XPNTS_TOKEN_ADDRESS", vm.toString(address(xpnts)));
+
+        // -- 阶段 1:不设 REGISTRY_ADDRESS => envOr 默认 canonical 常量。
+        // canonical 地址在本地 EVM 上无代码,broadcast 前的 codeless 检查按预期
+        // revert,证明默认值生效(mock registry 有代码,若误走 mock 则不会 revert)。
+        assertEq(
+            SEPOLIA_CANONICAL_REGISTRY,
+            0xf5Bf37ca83AfdAab73691bA7eCcDfA69b8708E71,
+            "canonical constant (@aastar/sdk v0.42.0 CANONICAL_ADDRESSES[11155111].registry)"
+        );
+        DeploySepolia script1 = new DeploySepolia();
+        vm.expectRevert(bytes("REGISTRY_ADDRESS has no code (wrong network?)"));
+        script1.run();
+
+        // -- 阶段 2:全套 env 注入 mock 依赖,TREASURY 不设 => 默认 deployer,
+        // deployer 有 ROLE_COMMUNITY => 脚本内 registerShop + setItems 全闭环
+        vm.setEnv("REGISTRY_ADDRESS", vm.toString(address(registry)));
+        _grantCommunity(deployer);
+        Deployment memory d = new DeploySepolia().run();
+
+        assertEq(d.shops.registry(), address(registry), "run: shops.registry from env");
+        assertEq(d.shops.platformTreasury(), deployer, "run: TREASURY defaults to deployer");
+        assertEq(d.shops.listingFeeToken(), address(xpnts), "run: listing fee token defaults to xPNTs");
+        assertEq(d.shops.platformFeeBps(), 300, "run: PLATFORM_FEE_BPS default 300");
+        assertEq(address(d.items.shops()), address(d.shops), "run: items wired to shops");
+        assertEq(d.items.riskSigner(), deployer, "run: riskSigner defaults to deployer");
+        assertEq(d.items.serialSigner(), deployer, "run: serialSigner defaults to deployer");
+        assertEq(address(d.action.token()), address(xpnts), "run: action token from env");
+        assertEq(d.action.treasury(), deployer, "run: action treasury defaults to deployer");
+        assertEq(d.action.allowedShopId(), 1, "run: SHOP_ID default 1");
+        assertTrue(d.items.allowedActions(address(d.action)), "run: action allowlisted");
+        assertTrue(d.shopRegistered, "run: shop registered in-script");
+        (address shopOwner,,,) = d.shops.shops(1);
+        assertEq(shopOwner, deployer, "run: shop owner is deployer");
+        assertTrue(d.itemsBound, "run: setItems called (treasury == deployer)");
+        assertEq(d.action.items(), address(d.items), "run: action.items bound");
+
+        // -- 阶段 3:TREASURY_ADDRESS 覆写为外部地址 + deployer 无 ROLE_COMMUNITY
+        // (换一个干净 registry)=> 跳过 registerShop/setItems,
+        // 走 _printSummary 的手动步骤分支 [1][2]
+        MockRegistry registry2 = new MockRegistry();
+        vm.setEnv("REGISTRY_ADDRESS", vm.toString(address(registry2)));
+        vm.setEnv("TREASURY_ADDRESS", vm.toString(externalTreasury));
+        Deployment memory d2 = new DeploySepolia().run();
+
+        assertEq(d2.shops.platformTreasury(), externalTreasury, "run: TREASURY env override");
+        assertEq(d2.action.treasury(), externalTreasury, "run: action treasury override");
+        assertFalse(d2.shopRegistered, "run: no ROLE_COMMUNITY => manual registerShop");
+        assertEq(d2.shops.shopCount(), 0, "run: no shop registered");
+        assertFalse(d2.itemsBound, "run: external treasury => manual setItems");
+        assertEq(d2.action.items(), address(0), "run: action.items unset");
+    }
+
     function test_DeployCore_EndToEndPurchaseSmoke() external {
         _grantCommunity(address(this));
         Deployment memory d = deployCore(_params());

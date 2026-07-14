@@ -73,7 +73,7 @@ contract DeploySepolia is Script {
         bool itemsBound; // treasury == executor 时脚本内完成 action.setItems
     }
 
-    function run() external {
+    function run() external returns (Deployment memory d) {
         uint256 deployerPk = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address deployer = vm.addr(deployerPk);
         address xpnts = vm.envAddress("XPNTS_TOKEN_ADDRESS");
@@ -93,8 +93,12 @@ contract DeploySepolia is Script {
             shopMetadataHash: vm.envOr("SHOP_METADATA_HASH", bytes32(0))
         });
 
+        // env 阶段 fail-fast:broadcast 前就挡掉 codeless registry(接错网络/错地址),
+        // 不进入广播流程;deployCore 内同名 require 兜底直接调用方
+        require(p.registry.code.length > 0, "REGISTRY_ADDRESS has no code (wrong network?)");
+
         vm.startBroadcast(deployerPk);
-        Deployment memory d = deployCore(p);
+        d = deployCore(p);
         vm.stopBroadcast();
 
         _printSummary(p, d);
