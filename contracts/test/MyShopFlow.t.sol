@@ -4,7 +4,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {MyShops} from "../src/MyShops.sol";
 import {MyShopItems} from "../src/MyShopItems.sol";
-import {MintERC20Action} from "../src/actions/MintERC20Action.sol";
+import {TransferRewardAction} from "../src/actions/TransferRewardAction.sol";
 import {MockRegistry} from "../src/mocks/MockRegistry.sol";
 import {MockERC20Mintable} from "../src/mocks/MockERC20Mintable.sol";
 import {MockCommunityNFT} from "../src/mocks/MockCommunityNFT.sol";
@@ -32,7 +32,7 @@ contract MyShopFlowTest is Test {
     MockERC20Mintable internal usdc;
     MockERC20Mintable internal wbtc;
     MockCommunityNFT internal nft;
-    MintERC20Action internal action;
+    TransferRewardAction internal action;
     MyShops internal shops;
     MyShopItems internal items;
 
@@ -45,10 +45,13 @@ contract MyShopFlowTest is Test {
         usdc = new MockERC20Mintable("USDC", "USDC", 6);
         wbtc = new MockERC20Mintable("WBTC", "WBTC", 8);
         nft = new MockCommunityNFT();
-        action = new MintERC20Action();
 
         shops = new MyShops(address(registry), platformTreasury, address(apnts), 100 ether, 300);
         items = new MyShopItems(address(shops), riskSigner, serialSigner);
+
+        // MS-1: 奖励从社区 owner 金库 transferFrom 发放,MyShop 无任何 mint 权
+        action = new TransferRewardAction(address(apnts), community);
+        action.setItems(address(items));
         items.setActionAllowed(address(action), true);
 
         registry.setHasRole(ROLE_COMMUNITY, community, true);
@@ -64,6 +67,9 @@ contract MyShopFlowTest is Test {
 
         vm.prank(community);
         apnts.approve(address(items), type(uint256).max);
+
+        vm.prank(community);
+        apnts.approve(address(action), type(uint256).max);
 
         vm.prank(buyer);
         usdc.approve(address(items), type(uint256).max);
@@ -81,7 +87,7 @@ contract MyShopFlowTest is Test {
             soulbound: true,
             tokenURI: "ipfs://token",
             action: address(action),
-            actionData: abi.encode(address(apnts), 50 ether),
+            actionData: abi.encode(uint256(50 ether)),
             requiresSerial: requiresSerial,
             maxItems: maxItems,
             deadline: deadline,
@@ -154,6 +160,7 @@ contract MyShopFlowTest is Test {
         uint256 platformBefore = usdc.balanceOf(platformTreasury);
         uint256 shopBefore = usdc.balanceOf(communityTreasury);
         uint256 apntsBefore = apnts.balanceOf(recipient);
+        uint256 treasuryApntsBefore = apnts.balanceOf(community);
 
         vm.prank(buyer);
         uint256 firstTokenId = items.buy(itemId, 1, recipient, "");
@@ -166,8 +173,10 @@ contract MyShopFlowTest is Test {
         assertEq(platformAfter - platformBefore, 30);
         assertEq(shopAfter - shopBefore, 970);
 
+        // MS-1: 奖励来自金库转账,不再有新铸
         uint256 apntsAfter = apnts.balanceOf(recipient);
         assertEq(apntsAfter - apntsBefore, 50 ether);
+        assertEq(treasuryApntsBefore - apnts.balanceOf(community), 50 ether);
     }
 
     function test_buy_requiresSerial_whenItemConfigured() external {
