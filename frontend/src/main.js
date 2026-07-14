@@ -3287,16 +3287,16 @@ async function renderShopConsole(container, query = {}) {
       inputRow("action(optional)", "action", "0x0000000000000000000000000000000000000000"),
       inputRow("actionData(hex)", "actionData", "0x"),
       el("div", { style: "margin: 8px 0;" }, [
-        el("h4", { text: "MintERC20 actionData builder" }),
-        inputRow("mintToken", "mintToken", "0x..."),
+        // MS-1: TransferRewardAction 的 actionData 只编码 uint256 amountPerUnit
+        // (token/treasury 已在 action 构造时固定)
+        el("h4", { text: "TransferReward actionData builder" }),
         inputRow("amountPerUnit(uint256)", "amountPerUnit", "1000"),
         el("button", {
           text: "Build actionData",
           onclick: () => {
             try {
-              const token = getAddress(val("mintToken"));
               const amount = BigInt(val("amountPerUnit") || "0");
-              const hex = encodeAbiParameters([{ type: "address" }, { type: "uint256" }], [token, amount]);
+              const hex = encodeAbiParameters([{ type: "uint256" }], [amount]);
               setInputValue("actionData", hex);
             } catch (e) {
               showTxError(e);
@@ -3518,7 +3518,7 @@ async function renderConfig(container) {
       inputRow("CHAIN_ID", "chainId"),
       inputRow("SHOPS_ADDRESS", "shopsAddress"),
       inputRow("ITEMS_ADDRESS", "itemsAddress"),
-      inputRow("ITEMS_ACTION_ADDRESS (MintERC20Action)", "itemsActionAddress"),
+      inputRow("ITEMS_ACTION_ADDRESS (TransferRewardAction)", "itemsActionAddress"),
       inputRow("ERC721_ACTION_ADDRESS (MintERC721Action)", "erc721ActionAddress"),
       inputRow("ERC721_DEFAULT_TEMPLATE_ID (uint256)", "defaultTemplateId"),
       inputRow("WORKER_URL (permit)", "workerUrl"),
